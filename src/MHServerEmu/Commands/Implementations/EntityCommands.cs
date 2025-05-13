@@ -3,6 +3,7 @@ using MHServerEmu.Core.Collisions;
 using MHServerEmu.Core.Network;
 using MHServerEmu.Core.VectorMath;
 using MHServerEmu.DatabaseAccess.Models;
+using MHServerEmu.Frontend;
 using MHServerEmu.Games;
 using MHServerEmu.Games.Entities;
 using MHServerEmu.Games.Entities.Avatars;
@@ -11,6 +12,8 @@ using MHServerEmu.Games.GameData.Calligraphy;
 using MHServerEmu.Games.GameData.Prototypes;
 using MHServerEmu.Games.Network;
 using MHServerEmu.Games.Regions;
+using MHServerEmu.Grouping;
+using MHServerEmu.PlayerManagement;
 
 namespace MHServerEmu.Commands.Implementations
 {
@@ -171,37 +174,123 @@ namespace MHServerEmu.Commands.Implementations
         }
 
         [Command("tp")]
-        [CommandDescription("Teleports to the first entity present in the region which prototype name contains the string given (ignore the case).")]
-        [CommandUsage("entity tp [pattern]")]
+        [CommandDescription("Teleports self or another player to an entity matching the pattern. If teleporting another player, entity is searched in their region.")]
+        [CommandUsage("entity tp [pattern] OR entity tp [targetPlayerName] [pattern]")]
         [CommandUserLevel(AccountUserLevel.Admin)]
         [CommandInvokerType(CommandInvokerType.Client)]
-        [CommandParamCount(1)]
+        [CommandParamCount(1)] // Minimum 1 parameter (pattern for self-teleport)
         public string Tp(string[] @params, NetClient client)
         {
-            PlayerConnection playerConnection = (PlayerConnection)client;
-            Avatar avatar = playerConnection.Player.CurrentAvatar;
-            if (avatar == null || avatar.IsInWorld == false)
-                return "Avatar not found.";
+            PlayerConnection adminConnection = (PlayerConnection)client;
+            if (adminConnection == null) return "Error: Could not get admin player connection.";
+            Player adminPlayer = adminConnection.Player;
+            if (adminPlayer == null) return "Error: Could not get admin player entity.";
+            Avatar adminAvatar = adminPlayer.CurrentAvatar;
 
-            if (avatar.Region == null) return "No region found.";
+            if (adminAvatar == null || !adminAvatar.IsInWorld)
+            {
+                return "Admin avatar not found or not in world.";
+            }
 
-            Entity targetEntity = avatar.Region.Entities.FirstOrDefault(k => k.PrototypeName.ToLower().Contains(@params[0].ToLower()));
+            string entityPattern;
+            Player playerToTeleport = adminPlayer; // Default to admin self-teleport
+            Avatar avatarToTeleport = adminAvatar;
+            Region searchRegion = adminAvatar.Region;
 
-            if (targetEntity == null) return $"No entity found with the name {@params[0]}";
+            if (@params.Length == 1) // Self-teleport: !entity tp [pattern]
+            {
+                entityPattern = @params[0];
+            }
+            else if (@params.Length >= 2) // Target player teleport: !entity tp [playerName] [pattern]
+            {
+                string targetPlayerName = @params[0];
+                entityPattern = @params[1];
 
-            if (targetEntity is not WorldEntity worldEntity)
-                return "No world entity found.";
+                // Find the target player
+                var playerManager = ServerManager.Instance.GetGameService(ServerType.PlayerManager) as PlayerManagerService;
+                if (playerManager == null) return "Error: PlayerManagerService is not available.";
+                var groupingManager = ServerManager.Instance.GetGameService(ServerType.GroupingManager) as GroupingManagerService;
+                if (groupingManager == null) return "Error: GroupingManagerService is not available.";
 
-            Vector3 teleportPoint = worldEntity.RegionLocation.Position;
-            avatar.ChangeRegionPosition(teleportPoint, null, ChangePositionFlags.Teleport);
+                if (!groupingManager.TryGetClient(targetPlayerName, out IFrontendClient targetFrontendClient))
+                {
+                    return $"Target player '{targetPlayerName}' not found or is not online.";
+                }
+                if (!(targetFrontendClient is FrontendClient targetGameClient))
+                {
+                    return $"Target player '{targetPlayerName}' is not a recognized game client type.";
+                }
+                if (targetGameClient.GameId == 0)
+                {
+                    return $"Target player '{targetPlayerName}' is not currently associated with a game world.";
+                }
+                Game targetPlayerGame = playerManager.GetGameByPlayer(targetGameClient);
+                if (targetPlayerGame == null)
+                {
+                    return $"Could not find the game instance for target player '{targetPlayerName}'.";
+                }
+                if (targetGameClient.Session == null || targetGameClient.Session.Account == null)
+                {
+                    return $"Target player '{targetPlayerName}' session or account information is missing.";
+                }
+                ulong targetAccountDbId = (ulong)targetGameClient.Session.Account.Id;
+                Player foundTargetPlayer = targetPlayerGame.EntityManager.IterateEntities().OfType<Player>().FirstOrDefault(p => p.DatabaseUniqueId == targetAccountDbId);
 
-            return $"Teleporting to {teleportPoint.ToStringNames()}.";
+                if (foundTargetPlayer == null)
+                {
+                    return $"Could not find player entity for '{targetPlayerName}'.";
+                }
+
+                playerToTeleport = foundTargetPlayer;
+                avatarToTeleport = playerToTeleport.CurrentAvatar;
+
+                if (avatarToTeleport == null || !avatarToTeleport.IsInWorld)
+                {
+                    return $"Target player '{targetPlayerName}' does not have an active avatar in the world.";
+                }
+                searchRegion = avatarToTeleport.Region; // Search in the target player's region
+            }
+            else // Should be caught by CommandParamCount(1) but as a fallback
+            {
+                return "Invalid parameters. Usage: !entity tp [pattern] OR !entity tp [targetPlayerName] [pattern]";
+            }
+
+            if (searchRegion == null) return $"Region not found for {(playerToTeleport == adminPlayer ? "your" : playerToTeleport.GetName() + "'s")} avatar.";
+
+            string patternLower = entityPattern.ToLowerInvariant();
+            Entity targetEntity = searchRegion.Entities.FirstOrDefault(k =>
+                GameDatabase.GetPrototypeName(k.PrototypeDataRef).ToLowerInvariant().Contains(patternLower));
+
+            if (targetEntity == null) return $"No entity found with a prototype name containing '{entityPattern}' in {(playerToTeleport == adminPlayer ? "your" : playerToTeleport.GetName() + "'s")} current region.";
+
+            if (targetEntity is not WorldEntity worldEntityToTpTo)
+                return $"Found entity (Prototype: {GameDatabase.GetPrototypeName(targetEntity.PrototypeDataRef)}) is not a WorldEntity and cannot be teleported to.";
+
+            Vector3 teleportPoint = worldEntityToTpTo.RegionLocation.Position;
+            avatarToTeleport.ChangeRegionPosition(teleportPoint, null, ChangePositionFlags.Teleport);
+
+            string teleportedPlayerName = playerToTeleport.GetName();
+            string targetEntityName = GameDatabase.GetPrototypeName(worldEntityToTpTo.PrototypeDataRef);
+
+            if (playerToTeleport == adminPlayer)
+            {
+                return $"Teleporting you to {targetEntityName} (ID: {worldEntityToTpTo.Id}) at {teleportPoint.ToStringNames()}.";
+            }
+            else
+            {
+                // Notify the target player if they were teleported by an admin
+                if (playerToTeleport.PlayerConnection?.FrontendClient is FrontendClient tc)
+                {
+                    ChatHelper.SendMetagameMessage(tc, $"You have been teleported by an admin to {targetEntityName}.");
+                }
+                return $"Teleported player '{teleportedPlayerName}' to {targetEntityName} (ID: {worldEntityToTpTo.Id}) at {teleportPoint.ToStringNames()}.";
+            }
         }
 
         [Command("create")]
         [CommandDescription("Create entity near the avatar based on pattern (ignore the case) and count (default 1).")]
         [CommandUsage("entity create [pattern] [count]")]
-        [CommandUserLevel(AccountUserLevel.Admin)]
+        [CommandUserLevel(AccountUserLevel.Moderator)]
         [CommandInvokerType(CommandInvokerType.Client)]
         [CommandParamCount(1)]
         public string Create(string[] @params, NetClient client)
