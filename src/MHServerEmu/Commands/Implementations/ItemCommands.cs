@@ -336,6 +336,6 @@ namespace MHServerEmu.Commands.Implementations
                 return $"No items found matching '{searchPattern}' in your stashes.";
             }
         }
-        
+       
     }
 }

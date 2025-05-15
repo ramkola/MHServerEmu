@@ -1,20 +1,15 @@
-using System.Diagnostics;
 using MHServerEmu.Commands.Attributes;
 using MHServerEmu.Core.Logging;
 using MHServerEmu.Core.Network;
-using MHServerEmu.DatabaseAccess.Models;
 using MHServerEmu.Games.Entities;
-using MHServerEmu.Games.Entities.Avatars;
 using MHServerEmu.Games.Entities.Inventories;
 using MHServerEmu.Games.Entities.Items;
 using MHServerEmu.Games.GameData;
-using MHServerEmu.Games.GameData.Calligraphy;
-using MHServerEmu.Games.GameData.Prototypes;
-using MHServerEmu.Games.Loot;
 using MHServerEmu.Games.Network;
 using MHServerEmu.Games.Properties;
 using System.Text;
 using MHServerEmu.Games.Entities.Options;
+using System.Reflection;
 
 namespace MHServerEmu.Commands.Implementations
 {
@@ -113,7 +108,7 @@ namespace MHServerEmu.Commands.Implementations
             sb.AppendLine("\nUsage examples:");
             sb.AppendLine("!stash sort all General01");
             sb.AppendLine("!stash sort uniques Wolverine");
-            sb.AppendLine("!stash sort slot1 DoctorDoom");
+            sb.AppendLine("!stash sort slot1 Doctor Doom");
             
             return sb.ToString();
         }
@@ -214,6 +209,7 @@ namespace MHServerEmu.Commands.Implementations
             if (!string.IsNullOrEmpty(targetStashName))
             {
                 targetStashName = DecodeUrlString(targetStashName);
+                //Logger.Debug($"SortInventoryWithFilter: Target stash name after decode: '{targetStashName}'");
             }
 
             Inventory generalInventory = player.GetInventory(InventoryConvenienceLabel.General);
@@ -262,6 +258,8 @@ namespace MHServerEmu.Commands.Implementations
                         string generatedName = GenerateStashName(stash, GameDatabase.GetPrototypeName(stash.PrototypeDataRef));
                         generatedName = DecodeUrlString(generatedName);
                         
+                        //Logger.Debug($"SortInventoryWithFilter: Adding stash - DisplayName: '{displayName}', GeneratedName: '{generatedName}'");
+                        
                         stashNameMap[displayName] = stash;
                         if (generatedName != displayName)
                             stashNameMap[generatedName] = stash; // Allow lookup by both names
@@ -286,10 +284,11 @@ namespace MHServerEmu.Commands.Implementations
                     // Get the actual display name for logging
                     StashTabOptions options = GetStashTabOptions(player, targetStash);
                     string actualName = options?.DisplayName ?? targetStashName;
-                    Logger.Debug($"SortInventoryWithFilter: Using specific stash tab '{actualName}'");
+                    //Logger.Debug($"SortInventoryWithFilter: Using specific stash tab '{actualName}'");
                 }
                 else
                 {
+                    //Logger.Debug($"SortInventoryWithFilter: Stash tab '{targetStashName}' not found in available stashes.");
                     return $"Stash tab '{targetStashName}' not found. Use '!stash list stashes' to see available stash tabs.";
                 }
             }
@@ -303,10 +302,14 @@ namespace MHServerEmu.Commands.Implementations
                 Item item = player.Game.EntityManager.GetEntity<Item>(entry.Id);
                 if (item != null && !item.IsEquipped)
                 {
+                    string itemName = GameDatabase.GetPrototypeName(item.PrototypeDataRef);
                     // Apply filter
                     if (filter != "all" && !MatchesFilter(item, filter))
+                    {
+                        //Logger.Debug($"SortInventoryWithFilter: Item '{itemName}' did not match filter '{filter}'");
                         continue;
-
+                    }
+                    //Logger.Debug($"SortInventoryWithFilter: Item '{itemName}' matched filter '{filter}'");
                     itemsToMove.Add(item);
                 }
             }
@@ -317,13 +320,14 @@ namespace MHServerEmu.Commands.Implementations
                 itemsToMove = itemsToMove
                     .OrderBy(item => GameDatabase.GetPrototypeName(item.PrototypeDataRef)) // Primary sort: Item Name
                     .ToList();
-                Logger.Debug($"SortInventoryWithFilter: Sorted {itemsToMove.Count} items from general inventory before moving to stash.");
+                //Logger.Debug($"SortInventoryWithFilter: Sorted {itemsToMove.Count} items from general inventory before moving to stash.");
             }
 
             foreach (Item item in itemsToMove)
             {
                 if (item == null) continue;
-
+                string itemName = GameDatabase.GetPrototypeName(item.PrototypeDataRef);
+                
                 Inventory selectedStash = null;
                 uint targetSlot = Inventory.InvalidSlot;
 
@@ -335,10 +339,14 @@ namespace MHServerEmu.Commands.Implementations
                         string stashProtoName = GameDatabase.GetPrototypeName(stash.PrototypeDataRef);
                         string avatarName = ExtractAvatarNameFromStash(stashProtoName);
                         
+                        //Logger.Debug($"SortInventoryWithFilter: Checking if item '{itemName}' is suitable for avatar '{avatarName}'");
+                        
                         if (!string.IsNullOrEmpty(avatarName) && !IsItemSuitableForAvatar(item, avatarName))
                         {
+                            //Logger.Debug($"SortInventoryWithFilter: Item '{itemName}' not suitable for avatar '{avatarName}'");
                             continue; // Skip this avatar stash if the item doesn't match
                         }
+                        //Logger.Debug($"SortInventoryWithFilter: Item '{itemName}' is suitable for avatar '{avatarName}'");
                     }
                     
                     if (stash.PassesContainmentFilter(item.PrototypeDataRef) == InventoryResult.Success)
@@ -353,6 +361,14 @@ namespace MHServerEmu.Commands.Implementations
                                 break;
                             }
                         }
+                        else
+                        {
+                            Logger.Debug($"SortInventoryWithFilter: Cannot place item '{itemName}' in stash. Reason: {canPlaceResult}");
+                        }
+                    }
+                    else
+                    {
+                        Logger.Debug($"SortInventoryWithFilter: Item '{itemName}' failed containment filter for stash");
                     }
                 }
 
@@ -370,13 +386,17 @@ namespace MHServerEmu.Commands.Implementations
                         string stashName = options?.DisplayName ?? GameDatabase.GetPrototypeName(selectedStash.PrototypeDataRef);
                         stashName = DecodeUrlString(stashName);
                         
-                        Logger.Debug($"SortInventoryWithFilter: Moved {GameDatabase.GetPrototypeName(item.PrototypeDataRef)} to {stashName}, Slot: {targetSlot}" + 
-                            (stackEntityId.HasValue && stackEntityId.Value != Entity.InvalidId ? $" (Stacked on {stackEntityId.Value})" : ""));
+                        //Logger.Debug($"SortInventoryWithFilter: Moved {itemName} to {stashName}, Slot: {targetSlot}" + 
+                        //    (stackEntityId.HasValue && stackEntityId.Value != Entity.InvalidId ? $" (Stacked on {stackEntityId.Value})" : ""));
                     }
                     else
                     {
-                        Logger.Warn($"SortInventoryWithFilter: Failed to move {GameDatabase.GetPrototypeName(item.PrototypeDataRef)}. Reason: {moveResult}");
+                        Logger.Warn($"SortInventoryWithFilter: Failed to move {itemName}. Reason: {moveResult}");
                     }
+                }
+                else
+                {
+                    Logger.Debug($"SortInventoryWithFilter: No suitable stash found for item '{itemName}'");
                 }
             }
 
@@ -387,6 +407,7 @@ namespace MHServerEmu.Commands.Implementations
             else
                 return $"Auto-sort complete. Moved {itemsMoved} {filter} item(s) to stash tabs.";
         }
+
 
         private string SortInventoryInternal(Player player)
         {
@@ -428,7 +449,7 @@ namespace MHServerEmu.Commands.Implementations
                     }
                 }
             }
-            Logger.Debug($"AutoSort Internal: Finished stack consolidation attempt for {player.GetName()}. Consolidated: {stacksConsolidatedCount}");
+            //Logger.Debug($"AutoSort Internal: Finished stack consolidation attempt for {player.GetName()}. Consolidated: {stacksConsolidatedCount}");
 
             // --- Step 2: Compact Inventory (Fill Gaps & Sort by Name) ---
             Logger.Debug($"AutoSort Internal: Starting compaction for {player.GetName()}...");
@@ -463,7 +484,7 @@ namespace MHServerEmu.Commands.Implementations
                 itemsToReAdd = itemsToReAdd
                     .OrderBy(item => GameDatabase.GetPrototypeName(item.PrototypeDataRef))
                     .ToList();
-                Logger.Debug($"AutoSort Internal: Sorted {itemsToReAdd.Count} items for re-adding.");
+                //Logger.Debug($"AutoSort Internal: Sorted {itemsToReAdd.Count} items for re-adding.");
             }
 
             // Re-add items sequentially from slot 0 in the new sorted order
@@ -533,29 +554,27 @@ namespace MHServerEmu.Commands.Implementations
         }
 
         // Helper method to get StashTabOptions for a stash
+        private static readonly FieldInfo StashTabOptionsField = typeof(Player).GetField("_stashTabOptionsDict", 
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+
         private StashTabOptions GetStashTabOptions(Player player, Inventory stash)
         {
-            // Access the _stashTabOptionsDict from the Player class
-            // We need to use reflection since _stashTabOptionsDict is a private field
-            var field = player.GetType().GetField("_stashTabOptionsDict", 
-                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-            
-            if (field != null)
+            if (StashTabOptionsField == null || player == null || stash == null)
+                return null;
+
+            var stashTabOptionsDict = StashTabOptionsField.GetValue(player) as Dictionary<PrototypeId, StashTabOptions>;
+            if (stashTabOptionsDict?.TryGetValue(stash.PrototypeDataRef, out StashTabOptions options) == true)
             {
-                var stashTabOptionsDict = field.GetValue(player) as Dictionary<PrototypeId, StashTabOptions>;
-                if (stashTabOptionsDict != null && stashTabOptionsDict.TryGetValue(stash.PrototypeDataRef, out StashTabOptions options))
+                if (!string.IsNullOrEmpty(options.DisplayName))
                 {
-                    // Decode the display name if it exists
-                    if (!string.IsNullOrEmpty(options.DisplayName))
-                    {
-                        options.DisplayName = DecodeUrlString(options.DisplayName);
-                    }
-                    return options;
+                    options.DisplayName = DecodeUrlString(options.DisplayName);
                 }
+                return options;
             }
-            
+
             return null;
         }
+
 
         // Helper method to generate a stash name from prototype
         private string GenerateStashName(Inventory stash, string protoName)
@@ -669,15 +688,16 @@ namespace MHServerEmu.Commands.Implementations
 
             // Get the item prototype name
             string itemProtoName = GameDatabase.GetPrototypeName(item.PrototypeDataRef).ToLowerInvariant();
+            Logger.Debug($"Checking item suitability - Item: {itemProtoName}, Avatar: {avatarName}");
             
             // Create a mapping of avatar names to their possible variations
             Dictionary<string, List<string>> avatarVariations = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase)
             {
-                { "DoctorDoom", new List<string> { "doctordoom", "drdoom"} },
-                { "DoctorStrange", new List<string> { "doctorstrange", "drstrange" } },
-                { "Spiderman", new List<string> { "spiderman", "spider-man" } },
-                { "Starlord", new List<string> { "starlord", "star-lord" } },
-                { "InvisibleWoman", new List<string> { "invisiblewoman", "invisiwoman" } },
+                { "DrDoom.prototype", new List<string> { "doctordoom", "drdoom", "doom" } },
+                { "DrStrange.prototype", new List<string> { "doctorstrange", "drstrange" } },
+                { "Spiderman.prototype", new List<string> { "spiderman", "spider-man" } },
+                { "StarLord.prototype", new List<string> { "starlord", "star-lord" } },
+                { "InvisiWoman.prototype", new List<string> { "invisiblewoman", "invisiwoman" } },
             };
 
             // Check if the avatar name exists in our mapping
@@ -687,13 +707,18 @@ namespace MHServerEmu.Commands.Implementations
                 foreach (string variation in variations)
                 {
                     if (itemProtoName.Contains(variation))
+                    {
+                        //Logger.Debug($"Item matches avatar variation: {variation}");
                         return true;
+                    }
                 }
             }
             
-            // If no specific mapping, just check if the item name contains the avatar name
-            return itemProtoName.Contains(avatarName.ToLowerInvariant());
+            // If no specific mapping, just check if the item name contains the avatar name without .prototype
+            string baseAvatarName = avatarName.Replace(".prototype", "").ToLowerInvariant();
+            return itemProtoName.Contains(baseAvatarName);
         }
+
 
         // Helper method to check if an item matches a filter
         private bool MatchesFilter(Item item, string filter)
@@ -731,21 +756,15 @@ namespace MHServerEmu.Commands.Implementations
                     return itemProtoName.Contains("unique");
                 
                 case "slot1":
-                    // Slot 1 items (typically weapons)
-                    return itemProtoName.Contains("o1");
+                    return itemProtoName.Contains("/o1");
                 case "slot2":
-                    // Slot 1 items (typically weapons)
-                    return itemProtoName.Contains("o2");
+                    return itemProtoName.Contains("/o2");
                 case "slot3":
-                    // Slot 1 items (typically weapons)
-                    return itemProtoName.Contains("o3");
-                 case "slot4":
-                    // Slot 1 items (typically weapons)
-                    return itemProtoName.Contains("o4");
-                 case "slot5":
-                    // Slot 1 items (typically weapons)
-                    return itemProtoName.Contains("o5");
-                
+                    return itemProtoName.Contains("/o3");
+                case "slot4":
+                    return itemProtoName.Contains("/o4");
+                case "slot5":
+                    return itemProtoName.Contains("/o5"); 
                 default:
                     // If the filter doesn't match any predefined category, check if the item name contains the filter
                     return itemProtoName.Contains(filter);
