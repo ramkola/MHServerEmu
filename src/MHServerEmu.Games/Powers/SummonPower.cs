@@ -1,4 +1,5 @@
-﻿using MHServerEmu.Core.Collisions;
+﻿using Gazillion;
+using MHServerEmu.Core.Collisions;
 using MHServerEmu.Core.Extensions;
 using MHServerEmu.Core.Helpers;
 using MHServerEmu.Core.Logging;
@@ -11,12 +12,14 @@ using MHServerEmu.Games.Entities.Locomotion;
 using MHServerEmu.Games.Events;
 using MHServerEmu.Games.Events.Templates;
 using MHServerEmu.Games.GameData;
+using MHServerEmu.Games.GameData.LiveTuning;
 using MHServerEmu.Games.GameData.Prototypes;
 using MHServerEmu.Games.Navi;
 using MHServerEmu.Games.Populations;
 using MHServerEmu.Games.Properties;
 using MHServerEmu.Games.Properties.Evals;
 using MHServerEmu.Games.Regions;
+using System.Runtime.ConstrainedExecution;
 
 namespace MHServerEmu.Games.Powers
 {
@@ -37,7 +40,10 @@ namespace MHServerEmu.Games.Powers
         public int MaxSummons;
         public bool KillPrevious;
     }
-
+    public static class TunableGameplayValues
+    {
+        public static float SummonCountMultiplier { get; set; } = 1.0f;
+    }
     public class SummonPower : Power
     {
         public SummonPowerPrototype SummonPowerPrototype => Prototype as SummonPowerPrototype;
@@ -303,11 +309,12 @@ namespace MHServerEmu.Games.Powers
         private static void SummonPayloadEntity(EntityManager manager, SummonPowerPrototype powerProto, PowerPayload payload, WorldEntity target)
         {
             var payloadProperties = payload.Properties;
-            int summonNum = payloadProperties[PropertyEnum.SummonNumPerActivation];
-            if (summonNum < 1) return;
+            float summonMultiplier = TunableGameplayValues.SummonCountMultiplier;
+            int baseSummonNumPerActivation = payloadProperties[PropertyEnum.SummonNumPerActivation];
+            int summonNum = (int)(baseSummonNumPerActivation * summonMultiplier); 
 
             int maxSummons = powerProto.GetMaxNumSimultaneousSummons(payloadProperties);
-            if (maxSummons != 0 && summonNum > maxSummons) return;
+            //if (maxSummons != 0 && summonNum > maxSummons) return;
 
             if (payload.OwnerAlliance == null) return;
 
@@ -338,31 +345,31 @@ namespace MHServerEmu.Games.Powers
                 VariableActivationTime = payload.VariableActivationTime,
                 EntityAsset = payloadProperties[PropertyEnum.CreatorEntityAssetRefCurrent],
                 Properties = payloadProperties,
-                MaxSummons = maxSummons,
-                KillPrevious = killPrevious
+                MaxSummons = maxSummons, 
+                KillPrevious = killPrevious 
             };
 
-            for (int i = 0; i < summonNum; i++)
+            for (int i = 0; i < summonNum; i++) 
             {
+               
                 context.KillPrevious = killPrevious && maxSummons > 0 && count >= maxSummons;
 
                 var result = SummonEntityContext(manager, context, i);
                 switch (result)
                 {
                     case PowerUseResult.Success:
-
-                        count++;
-
+                        count++; 
                         if (killPrevious == false && maxSummons > 0 && count >= maxSummons)
                             return;
-
                         break;
 
                     case PowerUseResult.RestrictiveCondition:
                     case PowerUseResult.DisabledByLiveTuning:
+                      
                         break;
 
                     default:
+                        
                         return;
                 }
             }
