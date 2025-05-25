@@ -114,9 +114,35 @@ namespace MHServerEmu.Games.GameData.Prototypes
 
         public int GetMaxNumSimultaneousSummons(PropertyCollection properties)
         {
-            using EvalContextData evalContext = ObjectPoolManager.Instance.Get<EvalContextData>();
-            evalContext.SetReadOnlyVar_PropertyCollectionPtr(EvalContext.Default, properties);
-            return Eval.RunInt(SummonMaxSimultaneous, evalContext);
+            int originalMaxSimultaneous = 0;
+            if (this.SummonMaxSimultaneous != null) // Assuming SummonMaxSimultaneous is the EvalPrototype
+            {
+                using EvalContextData evalContext = ObjectPoolManager.Instance.Get<EvalContextData>();
+                evalContext.SetReadOnlyVar_PropertyCollectionPtr(EvalContext.Default, properties);
+                originalMaxSimultaneous = Eval.RunInt(this.SummonMaxSimultaneous, evalContext);
+            }
+            else
+            {
+               
+                if (this.SummonMaxSimultaneous == null)
+                {
+                    
+                    originalMaxSimultaneous = 1; // Defaulting to 1 if no eval
+                }
+            }
+
+            int desiredMinimumCap = 10;
+
+            int finalMax = 10;
+        
+           
+            if (originalMaxSimultaneous == 0) 
+            {
+                
+                return desiredMinimumCap; 
+            }
+
+            return Math.Max(originalMaxSimultaneous, desiredMinimumCap); 
         }
 
         public int GetMaxNumSummons(PropertyCollection properties)
