@@ -1,5 +1,4 @@
-﻿using System.Text;
-using Gazillion;
+﻿using Gazillion;
 using Google.ProtocolBuffers;
 using MHServerEmu.Core.Collections;
 using MHServerEmu.Core.Collisions;
@@ -10,6 +9,8 @@ using MHServerEmu.Core.Memory;
 using MHServerEmu.Core.Serialization;
 using MHServerEmu.Core.System.Time;
 using MHServerEmu.Core.VectorMath;
+using MHServerEmu.DatabaseAccess.Models;
+using MHServerEmu.Frontend;
 using MHServerEmu.Games.Achievements;
 using MHServerEmu.Games.Common;
 using MHServerEmu.Games.Dialog;
@@ -38,6 +39,7 @@ using MHServerEmu.Games.Regions.Maps;
 using MHServerEmu.Games.Regions.MatchQueues;
 using MHServerEmu.Games.Social.Communities;
 using MHServerEmu.Games.Social.Guilds;
+using System.Text;
 
 namespace MHServerEmu.Games.Entities
 {
@@ -510,14 +512,38 @@ namespace MHServerEmu.Games.Entities
         /// </summary>
         public string GetName(PlayerAvatarIndex avatarIndex = PlayerAvatarIndex.Primary)
         {
+            string baseName;
             if ((avatarIndex >= PlayerAvatarIndex.Primary && avatarIndex < PlayerAvatarIndex.Count) == false)
-                Logger.Warn("GetName(): avatarIndex out of range");
+            {
+                // Logger.Warn("GetName(): avatarIndex out of range");
+                baseName = _playerName.Get(); // Fallback to primary player name
+            }
+            else if (avatarIndex == PlayerAvatarIndex.Secondary)
+            {
+                baseName = _secondaryPlayerName.Get();
+            }
+            else // Primary avatar
+            {
+                baseName = _playerName.Get();
+            }
 
-            if (avatarIndex == PlayerAvatarIndex.Secondary)
-                return _secondaryPlayerName.Get();
+           
+            bool isAdminEquivalent = this.HasBadge(AvailableBadges.SiteCommands); // Use the badge(s) you've determined for admin/mod
 
-            return _playerName.Get();
+           
+            if (isAdminEquivalent)
+            {
+              
+                return $"{baseName} (Administrator!)";
+
+               
+            }
+
+        
+            return baseName;
         }
+
+
 
         /// <summary>
         /// Returns the console account id for the specified <see cref="PlayerAvatarIndex"/>.
