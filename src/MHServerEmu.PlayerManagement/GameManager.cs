@@ -1,4 +1,5 @@
 ﻿using MHServerEmu.Core.Logging;
+using MHServerEmu.Core.Network;
 using MHServerEmu.Core.System;
 using MHServerEmu.Games;
 using System; // Added for Math.Max
@@ -192,6 +193,13 @@ namespace MHServerEmu.PlayerManagement
                 Logger.Error("Exception occurred during game creation and startup.", LogChannels.Default); // Or LogChannels.General
                 return null;
             }
+        }
+
+        public void BroadcastServiceMessage<T>(in T message) where T: struct, IGameServiceMessage
+        {
+            // REMOVEME: This should be handled by the GameInstanceService
+            foreach (Game game in _gameDict.Values)
+                game.ReceiveServiceMessage(message);
         }
 
         /// <summary>
