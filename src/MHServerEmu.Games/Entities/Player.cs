@@ -2830,6 +2830,21 @@ namespace MHServerEmu.Games.Entities
 
         public void UnlockNewPlayerUISystems()
         {
+            // --- Start: Added code to re-lock zzzBrevikOLD.prototype ---
+            PrototypeId brevikAvatarId = (PrototypeId)6044485448390219466; // This is the ID for zzzBrevikOLD.prototype
+
+            // Check if the Brevik avatar is currently unlocked to Type2 (fully unlocked)
+            if (GetAvatarUnlockType(brevikAvatarId) == AvatarUnlockType.Type2)
+            {
+                // Re-lock the Brevik avatar by setting its unlock status to None.
+                // This ensures it's not considered fully unlocked.
+                Properties[PropertyEnum.AvatarUnlock, brevikAvatarId] = (int)AvatarUnlockType.None;
+                Logger.Info($"Player [{this}]: Automatically re-locked accidentally unlocked avatar {GameDatabase.GetFormattedPrototypeName(brevikAvatarId)}.");
+
+                // If client notification or other specific "on-lock" game events are needed,
+                // they would be triggered here. For this request, we are focusing on correcting the server-side state.
+            }
+
             if (_newPlayerUISystemsUnlocked)
                 return;
 
