@@ -1387,18 +1387,28 @@ namespace MHServerEmu.Games.Missions
             player.SetActiveChapter(PrototypeId.Invalid);
 
             // Save suspend state and reset mission state
-            foreach(var mission in _missionDict.Values)
+            List<Mission> missionsToSetInvalid = new List<Mission>();
+            foreach (var mission in _missionDict.Values)
+            {
                 if (mission.Prototype.SaveStatePerAvatar)
                 {
+                    if (mission.State != MissionState.Invalid)
+                    {
+                        missionsToSetInvalid.Add(mission);
+                    }
+                    // Handling IsSuspended can usually be done without modifying the collection structure
                     if (mission.IsSuspended)
                     {
                         mission.ReSuspended = true;
                         mission.SetSuspendedState(false);
                     }
-
-                    if (mission.State != MissionState.Invalid)
-                        mission.SetState(MissionState.Invalid);
                 }
+            }
+
+            foreach (var mission in missionsToSetInvalid)
+            {
+                mission.SetState(MissionState.Invalid); // Now modify based on the temporary list
+            }
 
             player.SetActiveChapter(properties[PropertyEnum.LastActiveMissionChapter]);
 
