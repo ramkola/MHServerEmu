@@ -30,7 +30,7 @@ namespace MHServerEmu.Gifts
     }
 
     /// <summary>
-    /// A game service that periodically checks for online players and distributes any unclaimed gifts.
+    /// A game service checks for online players when they login  and distributes any unclaimed gifts.
     /// </summary>
     public class GiftItemDistributor : IGameService
     {
