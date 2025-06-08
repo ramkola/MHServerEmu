@@ -1,8 +1,10 @@
-﻿using Gazillion;
+﻿using System.Text;
+using Gazillion;
 using MHServerEmu.Commands.Attributes;
 using MHServerEmu.Core.Helpers;
 using MHServerEmu.Core.Logging;
 using MHServerEmu.Core.Network;
+using MHServerEmu.Core.System.Time;
 using MHServerEmu.Core.VectorMath;
 using MHServerEmu.DatabaseAccess.Models;
 using MHServerEmu.Games;
@@ -15,6 +17,7 @@ using MHServerEmu.Games.Navi;
 using MHServerEmu.Games.Network;
 using MHServerEmu.Games.Populations;
 using MHServerEmu.Games.Powers.Conditions;
+using MHServerEmu.Games.Properties;
 
 namespace MHServerEmu.Commands.Implementations
 {
@@ -185,6 +188,7 @@ namespace MHServerEmu.Commands.Implementations
 
         [Command("getconditionlist")]
         [CommandDescription("Gets a list of all conditions tracked by the ConditionPool in the current game.")]
+        [CommandUserLevel(AccountUserLevel.Moderator)]
         [CommandInvokerType(CommandInvokerType.Client)]
         public string GetConditionList(string[] @params, NetClient client)
         {
@@ -223,6 +227,7 @@ namespace MHServerEmu.Commands.Implementations
 
         [Command("geteventpoolreport")]
         [CommandDescription("Returns a report representing the state of the ScheduledEventPool in the current game.")]
+        [CommandUserLevel(AccountUserLevel.Moderator)]
         [CommandInvokerType(CommandInvokerType.Client)]
         public string GetEventPoolStatus(string[] @params, NetClient client)
         {
