@@ -15,6 +15,7 @@ namespace MHServerEmu.Core.Network
         GameInstanceServer,
         Billing,
         Leaderboard,
+        GiftItemDistributor,
         NumServerTypes
     }
 

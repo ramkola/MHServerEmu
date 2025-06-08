@@ -1,6 +1,6 @@
 ﻿using System.Buffers;
 using Gazillion;
-using MHServerEmu.Core.System.Time;
+using MHServerEmu.Core.System.Time; 
 
 namespace MHServerEmu.Core.Network
 {
@@ -40,6 +40,31 @@ namespace MHServerEmu.Core.Network
             public readonly Type Protocol = protocol;
             public readonly MailboxMessage Message = message;
         }
+        public readonly struct GiftInfo
+        {
+            public readonly ulong ItemProtoId;
+            public readonly int Count;
+            public GiftInfo(ulong id, int count) { ItemProtoId = id; Count = count; }
+        }
+
+        // Message from Player -> GiftDistributor, triggered on login.
+        public readonly struct PlayerRequestsGifts(ulong playerDbId, ulong instanceId, string playerName) : IGameServiceMessage
+        {
+            public readonly ulong PlayerDbId = playerDbId;
+            public readonly ulong InstanceId = instanceId;
+            public readonly string PlayerName = playerName;
+        }
+
+        // Message from GiftDistributor -> PlayerManager, containing the delivery command.
+        public readonly struct AwardPlayerGifts(ulong playerDbId, ulong instanceId, List<GiftInfo> gifts) : IGameServiceMessage
+        {
+            public readonly ulong PlayerDbId = playerDbId;
+            public readonly ulong InstanceId = instanceId;
+            public readonly List<GiftInfo> GiftsToAward = gifts;
+        }
+
+
+
 
         #region Grouping Manager
 

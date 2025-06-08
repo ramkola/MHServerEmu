@@ -6,6 +6,17 @@ using MHServerEmu.Core.Network;
 using MHServerEmu.DatabaseAccess.Models;
 using MHServerEmu.Frontend;
 using MHServerEmu.Games;
+using MHServerEmu.Games.Common.SpatialPartitions;
+using MHServerEmu.Games.Entities;
+using MHServerEmu.Games.GameData;
+using MHServerEmu.Games.GameData.Prototypes;
+using MHServerEmu.Games.Loot;
+using MHServerEmu.Games.Network;
+using System.Linq;
+using System;
+using System.Buffers.Text;
+using System.Runtime.Intrinsics.X86;
+using static MHServerEmu.Core.Network.GameServiceProtocol;
 
 namespace MHServerEmu.PlayerManagement
 {
@@ -32,6 +43,19 @@ namespace MHServerEmu.PlayerManagement
         private readonly GameManager _gameManager;
         private readonly Dictionary<ulong, FrontendClient> _playerDict = new();
         private readonly Dictionary<ulong, Task> _pendingSaveDict = new();
+        public DatabaseAccess.Models.DBAccount GetAccountByName(string name)
+        {
+            foreach (var client in _playerDict.Values)
+            {
+                if (client.Session.Account.PlayerName.Equals(name, StringComparison.OrdinalIgnoreCase))
+                {
+                    return client.Session.Account;
+                }
+            }
+            return null;
+        }
+
+
 
         private readonly string _frontendAddress;
         private readonly string _frontendPort;
@@ -96,6 +120,12 @@ namespace MHServerEmu.PlayerManagement
                     OnRouteMessage(routeMessage);
                     break;
 
+
+                case GameServiceProtocol.AwardPlayerGifts awardGifts:
+                    OnAwardPlayerGifts(in awardGifts);
+                    break;
+
+
                 case GameServiceProtocol.LeaderboardStateChange leaderboardStateChange:
                     // REMOVEME: This should be handled by the GameInstanceService on its own
                     _gameManager.BroadcastServiceMessage(leaderboardStateChange);
@@ -111,6 +141,7 @@ namespace MHServerEmu.PlayerManagement
                     break;
             }
         }
+        
 
         public string GetStatus()
         {
@@ -165,7 +196,99 @@ namespace MHServerEmu.PlayerManagement
                 default: Logger.Warn($"Handle(): Unhandled {(ClientToGameServerMessage)message.Id} [{message.Id}]"); break;
             }
         }
+        public ICollection<FrontendClient> GetActiveClients()
+        {
+            lock (_playerDict)
+            {
+                // We return a new list (a copy) to make it safe to use on another thread,
+                // preventing errors if the original list is modified during the gift check.
+                return new List<FrontendClient>(_playerDict.Values);
+            }
+        }
 
+
+        private void OnAwardPlayerGifts(in GameServiceProtocol.AwardPlayerGifts awardGifts)
+        {
+            // LOG 1: Confirm the handler is called with the correct data.
+            Logger.Info($"[GiftDebug] OnAwardPlayerGifts called for DBID {awardGifts.PlayerDbId} with {awardGifts.GiftsToAward.Count} gift type(s).");
+
+            if (_playerDict.TryGetValue(awardGifts.PlayerDbId, out FrontendClient client))
+            {
+                // LOG 2: Confirm the client was found in the master dictionary.
+                Logger.Info($"[GiftDebug] Found active client for {awardGifts.PlayerDbId}. GameId: {client.GameId}");
+
+                Game game = GetGameByPlayer(client);
+                if (game != null)
+                {
+                    // LOG 3: Confirm the correct game instance was found.
+                    Logger.Info($"[GiftDebug] Found Game instance {game.Id}. Enqueuing delivery action.");
+
+                    var giftsToAward = awardGifts.GiftsToAward;
+
+                    game.EnqueueAction(() =>
+                    {
+                        // LOG 4: This confirms the action is running on the game's thread.
+                        Logger.Info($"[GiftDebug] Game-{game.Id} ActionQueue: Executing gift logic.");
+
+                        Player targetPlayer = null;
+
+                        // LOG 5: Check how many connections are in the manager we are about to search.
+                        Logger.Debug($"[GiftDebug] Game-{game.Id}: Searching through NetworkManager connections...");
+
+
+                        foreach (PlayerConnection connection in game.NetworkManager)
+                        {
+                            // This is your lookup logic.
+                            if (connection.FrontendClient == client) 
+                            {
+                                Logger.Info($"[GiftDebug] Game-{game.Id} Found matching player connection!");
+                                targetPlayer = connection.Player;
+                                break;
+                            }
+                        }
+
+                        if (targetPlayer != null)
+                        {
+                            // LOG 6: Confirm the player was found and check their region status.
+                            Logger.Info($"[GiftDebug] Player lookup successful. Player: {targetPlayer.GetName()}. Checking region...");
+                            if (targetPlayer.GetRegion() != null)
+                            {
+                                Logger.Info($"[GiftDebug] SUCCESS: Player {targetPlayer.GetName()} is in a region. Delivering gifts.");
+                                foreach (var gift in giftsToAward)
+                                {
+                                    var itemProto = GameDatabase.GetPrototype<ItemPrototype>((PrototypeId)gift.ItemProtoId);
+                                    if (itemProto != null)
+                                    {
+                                        for (int i = 0; i < gift.Count; i++)
+                                        {
+                                            targetPlayer.Game.LootManager.GiveItem(itemProto.DataRef, LootContext.Drop, targetPlayer);
+                                        }
+                                        Logger.Info($"[GiftSystem] Delivered {gift.Count}x {itemProto.DisplayName} to {targetPlayer.GetName()}.");
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                Logger.Warn($"[GiftDebug] Player {targetPlayer.GetName()} was found, but is NOT yet in a region. Gift will be re-attempted later.");
+                            }
+                        }
+                        else
+                        {
+                            // LOG 7: If the loop finishes with no match, this will tell us.
+                            Logger.Error($"[GiftDebug] FAILED to find a matching player connection in Game {game.Id}.");
+                        }
+                    });
+                }
+                else
+                {
+                    Logger.Warn($"[GiftDebug] Could not find Game instance for client with GameId {client.GameId}.");
+                }
+            }
+            else
+            {
+                Logger.Warn($"[GiftDebug] Could not find client in master dictionary for DBID {awardGifts.PlayerDbId}.");
+            }
+        }
         private bool OnLeaderboardRewardRequestResponse(in GameServiceProtocol.LeaderboardRewardRequestResponse leaderboardRewardRequestResponse)
         {
             // REMOVEME: This should be handled by the GameInstanceService on its own

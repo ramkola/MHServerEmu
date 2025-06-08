@@ -51,6 +51,8 @@ namespace MHServerEmu.Games.Entities
         private readonly Dictionary<ulong, Entity> _entityDict = new();
         private readonly Dictionary<ulong, Entity> _entityDbGuidDict = new();
         private readonly HashSet<ulong> _entitiesPendingCondemnedPowerDeletion = new();
+        private readonly Dictionary<ulong, Entity> _entities = new();
+        private readonly Dictionary<ulong, Player> _players = new();
 
         private readonly LinkedList<ulong> _entitiesPendingDestruction = new();
         private readonly Stack<LinkedListNode<ulong>> _entityDestroyListNodeStack = new();
@@ -70,7 +72,29 @@ namespace MHServerEmu.Games.Entities
         // NOTE: We break encapsulation here to allow the PlayerIterator to access this HashSet's struct enumerator and avoid boxing.
         // As an alternative, we could also move PlayerIterator to EntityManager as a nested struct.
         public HashSet<Player> Players { get; } = new();
+        public Player GetPlayerByName(string name)
+        {
+            // LOG 1: What name are we looking for?
+            Logger.Debug($"[EntityManager] Searching for player with name: '{name}'");
+            // LOG 2: How many players are there to check?
+            Logger.Debug($"[EntityManager] Searching through a list of {_players.Count} players.");
 
+            foreach (Player p in _players.Values)
+            {
+                string currentNameInList = p.GetName();
+                // LOG 3: Show every name we are comparing against.
+                Logger.Debug($"[EntityManager] ... comparing against '{currentNameInList}'");
+
+                if (currentNameInList.Equals(name, StringComparison.OrdinalIgnoreCase))
+                {
+                    Logger.Info($"[EntityManager] Found a match for {name}!");
+                    return p;
+                }
+            }
+
+            Logger.Warn($"[EntityManager] Finished search. No player found with name: '{name}'");
+            return null;
+        }
         public PhysicsManager PhysicsManager { get; set; }
         public EntityInvasiveCollection AllEntities { get; private set; }
         public EntityInvasiveCollection SimulatedEntities { get; private set; }
@@ -91,7 +115,19 @@ namespace MHServerEmu.Games.Entities
         {
             return PhysicsManager.Initialize(_game);
         }
-
+        public Player GetPlayerByDbId(ulong dbId)
+        {
+            // This method iterates through the private collection of players,
+            // which is only possible from inside this class.
+            foreach (Player p in _players.Values)
+            {
+                if (p.DatabaseUniqueId == dbId)
+                {
+                    return p;
+                }
+            }
+            return null;
+        }
         public Entity CreateEntity(EntitySettings settings)
         {
             if (IsDestroyingAllEntities) return null;   // Prevent new entities from being created during cleanup
@@ -364,8 +400,24 @@ namespace MHServerEmu.Games.Entities
         public bool AddPlayer(Player player)
         {
             if (player == null) return Logger.WarnReturn(false, "AddPlayer(): player == null");
+
+            // LOG 1: Let's see that the method is being called with the correct player.
+            Logger.Info($"[EntityManager] Attempting to add player '{player.GetName()}' with DBID {player.DatabaseUniqueId} to the Players list.");
+
+            // This is your original line of code.
             bool playerAdded = Players.Add(player);
-            if (playerAdded == false) Logger.Warn($"AddPlayer(): Failed to add player {player}");
+
+            if (playerAdded)
+            {
+                // LOG 2: If this appears, the player was successfully added.
+                Logger.Info($"[EntityManager] SUCCESS: Player '{player.GetName()}' was added. The Players list now contains {Players.Count} player(s).");
+            }
+            else
+            {
+                // LOG 3: If this appears, we know adding the player failed.
+                Logger.Error($"[EntityManager] FAILED: Could not add player '{player.GetName()}' to the list. The player may already be present.");
+            }
+
             return playerAdded;
         }
 

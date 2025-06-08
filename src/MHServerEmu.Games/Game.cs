@@ -1,6 +1,4 @@
-﻿using System.Diagnostics;
-using System.Globalization;
-using Gazillion;
+﻿using Gazillion;
 using Google.ProtocolBuffers;
 using MHServerEmu.Core.Config;
 using MHServerEmu.Core.Extensions;
@@ -17,6 +15,7 @@ using MHServerEmu.Games.Entities;
 using MHServerEmu.Games.Entities.Avatars;
 using MHServerEmu.Games.Entities.Items;
 using MHServerEmu.Games.Events;
+using MHServerEmu.Games.Events.Templates;
 using MHServerEmu.Games.GameData;
 using MHServerEmu.Games.GameData.LiveTuning;
 using MHServerEmu.Games.GameData.Prototypes;
@@ -27,6 +26,8 @@ using MHServerEmu.Games.Powers;
 using MHServerEmu.Games.Regions;
 using MHServerEmu.Games.Social;
 using MHServerEmu.Games.UI;
+using System.Diagnostics;
+using System.Globalization;
 
 namespace MHServerEmu.Games
 {
@@ -47,6 +48,8 @@ namespace MHServerEmu.Games
         public static readonly TimeSpan StartTime = TimeSpan.FromMilliseconds(1);
         public readonly NetStructGameOptions GameOptions;
         public readonly CustomGameOptionsConfig CustomGameOptions;
+        private readonly Queue<Action> _actionQueue = new();
+
 
         private static readonly Logger Logger = LogManager.CreateLogger();
 
@@ -79,6 +82,15 @@ namespace MHServerEmu.Games
         public GameDialogManager GameDialogManager { get; }
         public ChatManager ChatManager { get; }
         public LiveTuningData LiveTuningData { get; private set; } = new();
+       
+        public void EnqueueAction(Action action)
+        {
+            lock (_actionQueue)
+            {
+                _actionQueue.Enqueue(action);
+            }
+        }
+      
 
         public TimeSpan FixedTimeBetweenUpdates { get; } = TimeSpan.FromMilliseconds(1000f / TargetFrameRate);
         public TimeSpan RealGameTime { get => (TimeSpan)_realGameTime; }
@@ -91,11 +103,11 @@ namespace MHServerEmu.Games
         public bool AchievementsEnabled { get; set; }
         public bool LeaderboardsEnabled { get; set; }
         public bool InfinitySystemEnabled { get => GameOptions.InfinitySystemEnabled; }
-
+        
         public int PlayerCount { get => EntityManager.PlayerCount; }
 
         public override string ToString() => $"serverGameId=0x{Id:X}";
-
+       
         public Game(ulong id)
         {
             // Small lags are fine, and logging all of them creates too much noise
@@ -199,11 +211,12 @@ namespace MHServerEmu.Games
         {
             NetworkManager.AsyncAddClient(client);
         }
-
+       
         public void RemoveClient(IFrontendClient client)
         {
             NetworkManager.AsyncRemoveClient(client);
         }
+       
 
         public void ReceiveMessageBuffer(IFrontendClient client, in MessageBuffer messageBuffer)
         {
@@ -212,6 +225,8 @@ namespace MHServerEmu.Games
 
         public void ReceiveServiceMessage<T>(in T message) where T: struct, IGameServiceMessage
         {
+
+           
             ServiceMailbox.PostMessage(message);
         }
 
@@ -301,7 +316,7 @@ namespace MHServerEmu.Games
         private void Update()
         {
             // NOTE: We process input in NetworkManager.ReceiveAllPendingMessages() outside of UpdateFixedTime(), same as the client.
-
+    
             NetworkManager.Update();                            // Add / remove clients
             NetworkManager.ReceiveAllPendingMessages();         // Process input
             NetworkManager.ProcessPendingPlayerConnections();   // Load pending players
@@ -310,8 +325,18 @@ namespace MHServerEmu.Games
 
             UpdateLiveTuning();                                 // Check if live tuning data is out of date
 
-            UpdateFixedTime();                                  // Update simulation state
+            UpdateFixedTime();                 // Update simulation state
+            lock (_actionQueue)
+            {
+                while (_actionQueue.Count > 0)
+                {
+                    var action = _actionQueue.Dequeue();
+                    action?.Invoke();
+                }
+            }
+            
         }
+        
 
         private void UpdateFixedTime()
         {

@@ -6,6 +6,7 @@ using MHServerEmu.Core.Extensions;
 using MHServerEmu.Core.Helpers;
 using MHServerEmu.Core.Logging;
 using MHServerEmu.Core.Memory;
+using MHServerEmu.Core.Network;
 using MHServerEmu.Core.Serialization;
 using MHServerEmu.Core.System.Time;
 using MHServerEmu.Core.VectorMath;
@@ -24,8 +25,8 @@ using MHServerEmu.Games.GameData;
 using MHServerEmu.Games.GameData.Calligraphy;
 using MHServerEmu.Games.GameData.LiveTuning;
 using MHServerEmu.Games.GameData.Prototypes;
-using MHServerEmu.Games.Leaderboards;
 using MHServerEmu.Games.GameData.Tables;
+using MHServerEmu.Games.Leaderboards;
 using MHServerEmu.Games.Loot;
 using MHServerEmu.Games.Missions;
 using MHServerEmu.Games.Navi;
@@ -480,6 +481,8 @@ namespace MHServerEmu.Games.Entities
             InitializeVendors();
             ScheduleCheckHoursPlayedEvent();
             UpdateUISystemLocks();
+            
+
         }
 
         public override void ExitGame()
@@ -2992,6 +2995,10 @@ namespace MHServerEmu.Games.Entities
 
                 GiveLoginRewards(loginCount);
                 Properties[PropertyEnum.LoginCount] = loginCount;
+                ServerManager.Instance.SendMessageToService(
+    ServerType.GiftItemDistributor,
+    new GameServiceProtocol.PlayerRequestsGifts(this.DatabaseUniqueId, this.Game.Id, this.GetName())
+);
             }
 
             // Send gifting restrictions update.
@@ -3001,6 +3008,8 @@ namespace MHServerEmu.Games.Entities
                 .SetEmailVerified(_emailVerified)
                 .SetAccountCreationTimestampUtc((long)_accountCreationTimestamp.TotalSeconds)
                 .Build());
+            
+      
         }
 
         private int GetLoginCount()
@@ -3036,15 +3045,15 @@ namespace MHServerEmu.Games.Entities
                     Logger.Warn("GiveLoginRewards(): loginRewardProto == null");
                     continue;
                 }
-
+               
                 if (loginRewardProto.Day > loginCount)
                     continue;
 
                 PropertyId rewardId = new(PropertyEnum.LoginRewardReceivedDate, loginRewardProtoRef);
-
+                
                 if (Properties.HasProperty(rewardId))
                     continue;
-
+                
                 if (lootManager.GiveItem(loginRewardProto.Item, LootContext.CashShop, this) == false)
                 {
                     Logger.Warn($"GiveLoginRewards(): Failed to give login reward {loginRewardProto} to player [{this}]");
@@ -3052,6 +3061,8 @@ namespace MHServerEmu.Games.Entities
                 }
 
                 Properties[rewardId] = (long)Clock.UnixTime.TotalSeconds;
+                
+
             }
         }
 

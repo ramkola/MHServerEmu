@@ -18,6 +18,7 @@ using MHServerEmu.Games.GameData.LiveTuning;
 using MHServerEmu.Grouping;
 using MHServerEmu.Leaderboards;
 using MHServerEmu.PlayerManagement;
+using MHServerEmu.Gifts;
 
 namespace MHServerEmu
 {
@@ -89,6 +90,8 @@ namespace MHServerEmu
             serverManager.RegisterGameService(new GameInstanceService(), ServerType.GameInstanceServer);
             serverManager.RegisterGameService(new BillingService(), ServerType.Billing);
             serverManager.RegisterGameService(new LeaderboardService(), ServerType.Leaderboard);
+            serverManager.RegisterGameService(new GiftItemDistributor(), ServerType.GiftItemDistributor);
+
 
             serverManager.RunServices();
 

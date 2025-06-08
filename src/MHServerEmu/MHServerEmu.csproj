@@ -20,6 +20,14 @@
     <TieredCompilationQuickJit>false</TieredCompilationQuickJit>
   </PropertyGroup>
 
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Optimize>True</Optimize>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Optimize>False</Optimize>
+  </PropertyGroup>
+
   <ItemGroup>
     <Content Include="icon.ico" />
   </ItemGroup>
@@ -32,6 +40,7 @@
     <ProjectReference Include="..\MHServerEmu.DatabaseAccess\MHServerEmu.DatabaseAccess.csproj" />
     <ProjectReference Include="..\MHServerEmu.Frontend\MHServerEmu.Frontend.csproj" />
     <ProjectReference Include="..\MHServerEmu.Games\MHServerEmu.Games.csproj" />
+    <ProjectReference Include="..\MHServerEmu.Gifts\MHServerEmu.Gifts.csproj" />
     <ProjectReference Include="..\MHServerEmu.Grouping\MHServerEmu.Grouping.csproj" />
     <ProjectReference Include="..\MHServerEmu.Leaderboards\MHServerEmu.Leaderboards.csproj" />
     <ProjectReference Include="..\MHServerEmu.PlayerManagement\MHServerEmu.PlayerManagement.csproj" />
