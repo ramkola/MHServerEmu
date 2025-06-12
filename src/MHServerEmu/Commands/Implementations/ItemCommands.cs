@@ -529,5 +529,23 @@ namespace MHServerEmu.Commands.Implementations
             }
         }
        
+
+        [Command("cleardeliverybox")]
+        [CommandDescription("Destroys all items contained in the delivery box inventory.")]
+        [CommandInvokerType(CommandInvokerType.Client)]
+        public string ClearDeliveryBox(string[] @params, NetClient client)
+        {
+            PlayerConnection playerConnection = (PlayerConnection)client;
+            Player player = playerConnection.Player;
+
+            Inventory deliveryBox = player.GetInventory(InventoryConvenienceLabel.DeliveryBox);
+            if (deliveryBox == null)
+                return "Delivery box inventory not found.";
+
+            int count = deliveryBox.Count;
+            deliveryBox.DestroyContained();
+
+            return $"Destroyed {count} items contained in the delivery box inventory.";
+        }
     }
 }
