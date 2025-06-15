@@ -4,21 +4,24 @@ using MHServerEmu.Core.Config;
 using MHServerEmu.Core.Extensions;
 using MHServerEmu.Core.Helpers;
 using MHServerEmu.Core.Logging;
+using MHServerEmu.Core.Memory;
 using MHServerEmu.Core.Network;
 using MHServerEmu.Frontend;
 using MHServerEmu.Games;
 using MHServerEmu.Games.Entities;
+using MHServerEmu.Games.Entities.Items;
 using MHServerEmu.Games.GameData;
 using MHServerEmu.Games.GameData.Prototypes;
 using MHServerEmu.Games.Loot;
 using MHServerEmu.Games.MTXStore;
 using MHServerEmu.Games.Network;
 using MHServerEmu.PlayerManagement;
+using System;
+using System.Collections.Generic;
+using System.Linq;
 
 namespace MHServerEmu.Billing
 {
-    // TODO: Move message handling / order fullfillment to Games
-
     public class BillingService : IGameService
     {
         private static readonly Logger Logger = LogManager.CreateLogger();
@@ -29,10 +32,8 @@ namespace MHServerEmu.Billing
         public BillingService()
         {
             var config = ConfigManager.Instance.GetConfig<BillingConfig>();
-
             _catalog = FileHelper.DeserializeJson<Catalog>(Path.Combine(BillingDataDirectory, "Catalog.json"));
 
-            // Apply a patch to the catalog if it's enabled and there's one
             if (config.ApplyCatalogPatch)
             {
                 string patchPath = Path.Combine(BillingDataDirectory, "CatalogPatch.json");
@@ -43,7 +44,6 @@ namespace MHServerEmu.Billing
                 }
             }
 
-            // Override store urls if enabled
             if (config.OverrideStoreUrls)
             {
                 _catalog.Urls[0].StoreHomePageUrl = config.StoreHomePageUrl;
@@ -62,7 +62,6 @@ namespace MHServerEmu.Billing
         #region IGameService Implementation
 
         public void Run() { }
-
         public void Shutdown() { }
 
         public void ReceiveServiceMessage<T>(in T message) where T : struct, IGameServiceMessage
@@ -72,37 +71,30 @@ namespace MHServerEmu.Billing
                 case GameServiceProtocol.RouteMessage routeMailboxMessage:
                     OnRouteMailboxMessage(routeMailboxMessage);
                     break;
-
                 default:
                     Logger.Warn($"ReceiveServiceMessage(): Unhandled service message type {typeof(T).Name}");
                     break;
             }
         }
 
-        public string GetStatus()
-        {
-            return $"Catalog Entries: {_catalog.Entries.Length}";
-        }
+        public string GetStatus() => $"Catalog Entries: {_catalog.Entries.Length}";
 
         private void OnRouteMailboxMessage(in GameServiceProtocol.RouteMessage routeMailboxMessage)
         {
             FrontendClient client = (FrontendClient)routeMailboxMessage.Client;
-            MailboxMessage message = routeMailboxMessage.Message;
-
-            // This is pretty rough, we need a better way of handling this
-            // TODO: Move this to Games, use BillingService just as a source for catalog data
             PlayerManagerService playerManager = ServerManager.Instance.GetGameService(ServerType.PlayerManager) as PlayerManagerService;
             Game game = playerManager.GetGameByPlayer(client);
+            if (game == null) return;
             PlayerConnection playerConnection = game.NetworkManager.GetNetClient(client);
+            if (playerConnection == null) return;
             Player player = playerConnection.Player;
 
-            switch ((ClientToGameServerMessage)message.Id)
+            switch ((ClientToGameServerMessage)routeMailboxMessage.Message.Id)
             {
-                case ClientToGameServerMessage.NetMessageGetCatalog:            OnGetCatalog(player, message); break;           // 68
-                case ClientToGameServerMessage.NetMessageGetCurrencyBalance:    OnGetCurrencyBalance(player, message); break;   // 69
-                case ClientToGameServerMessage.NetMessageBuyItemFromCatalog:    OnBuyItemFromCatalog(player, message); break;   // 70
-
-                default: Logger.Warn($"Handle(): Unhandled {(ClientToGameServerMessage)message.Id} [{message.Id}]"); break;
+                case ClientToGameServerMessage.NetMessageGetCatalog: OnGetCatalog(player, routeMailboxMessage.Message); break;
+                case ClientToGameServerMessage.NetMessageGetCurrencyBalance: OnGetCurrencyBalance(player, routeMailboxMessage.Message); break;
+                case ClientToGameServerMessage.NetMessageBuyItemFromCatalog: OnBuyItemFromCatalog(player, routeMailboxMessage.Message); break;
+                default: Logger.Warn($"Handle(): Unhandled {(ClientToGameServerMessage)routeMailboxMessage.Message.Id} [{routeMailboxMessage.Message.Id}]"); break;
             }
         }
 
@@ -111,13 +103,11 @@ namespace MHServerEmu.Billing
         private bool OnGetCatalog(Player player, MailboxMessage message)
         {
             var getCatalog = message.As<NetMessageGetCatalog>();
-            if (getCatalog == null) return Logger.WarnReturn(false, $"OnGetCatalog(): Failed to retrieve message");
+            if (getCatalog == null) return Logger.WarnReturn(false, "OnGetCatalog(): Failed to retrieve message");
 
-            // Bail out if the client already has an up to date catalog
             if (getCatalog.TimestampSeconds == _catalog.TimestampSeconds && getCatalog.TimestampMicroseconds == _catalog.TimestampMicroseconds)
                 return true;
 
-            // Send the current catalog
             player.SendMessage(_catalog.ToNetMessageCatalogItems(false));
             return true;
         }
@@ -132,7 +122,7 @@ namespace MHServerEmu.Billing
         private bool OnBuyItemFromCatalog(Player player, MailboxMessage message)
         {
             var buyItemFromCatalog = message.As<NetMessageBuyItemFromCatalog>();
-            if (buyItemFromCatalog == null) return Logger.WarnReturn(false, $"OnBuyItemFromCatalog(): Failed to retrieve message");
+            if (buyItemFromCatalog == null) return Logger.WarnReturn(false, "OnBuyItemFromCatalog(): Failed to retrieve message");
 
             long skuId = buyItemFromCatalog.SkuId;
             BuyItemResultErrorCodes result = BuyItem(player, skuId);
@@ -142,75 +132,107 @@ namespace MHServerEmu.Billing
 
         private BuyItemResultErrorCodes BuyItem(Player player, long skuId)
         {
-            BuyItemResultErrorCodes result = BuyItemResultErrorCodes.BUY_RESULT_ERROR_UNKNOWN;
+            // --- 1. Validation ---
+            if (!player.HasFinishedTutorial())
+                return BuyItemResultErrorCodes.BUY_RESULT_ERROR_UNKNOWN;
 
-            // Make sure the player has already finished the tutorial, which could unlock characters depending on server settings.
-            if (player.HasFinishedTutorial() == false)
-                return result;
-
-            // Validate the order
             CatalogEntry entry = _catalog.GetEntry(skuId);
-            if (entry == null || entry.GuidItems.Length == 0)
-                return result;
+            if (entry == null || (entry.GuidItems.Length == 0 && entry.AdditionalGuidItems.Length == 0))
+                return BuyItemResultErrorCodes.BUY_RESULT_ERROR_UNKNOWN;
 
             if (entry.LocalizedEntries.IsNullOrEmpty())
-                return result;
+                return BuyItemResultErrorCodes.BUY_RESULT_ERROR_UNKNOWN;
 
             LocalizedCatalogEntry localizedEntry = entry.LocalizedEntries[0];
             long itemPrice = localizedEntry.ItemPrice;
-
             long balance = player.GazillioniteBalance;
+
             if (itemPrice > balance)
                 return BuyItemResultErrorCodes.BUY_RESULT_ERROR_INSUFFICIENT_BALANCE;
 
-            Prototype catalogItemProto = entry.GuidItems[0].ItemPrototypeRuntimeIdForClient.As<Prototype>();
-            if (catalogItemProto == null)
-                return result;
+            // --- 2. Collect All Items and Quantities ---
+            var itemsToGrant = new Dictionary<PrototypeId, int>();
+            Action<CatalogGuidEntry> collectItem = (guidItem) => {
+                var protoId = (PrototypeId)guidItem.ItemPrototypeRuntimeIdForClient;
+                if (itemsToGrant.ContainsKey(protoId))
+                    itemsToGrant[protoId] += guidItem.Quantity;
+                else
+                    itemsToGrant.Add(protoId, guidItem.Quantity);
+            };
 
-            // Fullfill
-            switch (catalogItemProto)
+            foreach (var guidItem in entry.GuidItems) collectItem(guidItem);
+            foreach (var guidItem in entry.AdditionalGuidItems) collectItem(guidItem);
+
+            // --- 3. Fulfill Purchase ---
+            foreach (var (protoId, quantity) in itemsToGrant)
             {
-                case ItemPrototype itemProto:
-                    // Give the player the item they are trying to "buy"
-                    if (player.Game.LootManager.GiveItem(itemProto.DataRef, LootContext.CashShop, player))
-                        result = BuyItemResultErrorCodes.BUY_RESULT_ERROR_SUCCESS;
-                    break;
+                Prototype catalogItemProto = protoId.As<Prototype>();
+                if (catalogItemProto == null)
+                {
+                    Logger.Warn($"BuyItem(): Could not find prototype for ID {protoId} in SkuId {skuId}");
+                    return BuyItemResultErrorCodes.BUY_RESULT_ERROR_UNKNOWN;
+                }
 
-                case PlayerStashInventoryPrototype playerStashInventoryProto:
-                    // Unlock the stash tab
-                    if (player.UnlockInventory(playerStashInventoryProto.DataRef))
-                        result = BuyItemResultErrorCodes.BUY_RESULT_ERROR_SUCCESS;
-                    break;
+                BuyItemResultErrorCodes fulfillmentResult = BuyItemResultErrorCodes.BUY_RESULT_ERROR_UNKNOWN;
 
-                case AvatarPrototype avatarProto:
-                    PrototypeId avatarProtoRef = avatarProto.DataRef;
-                    if (player.HasAvatarFullyUnlocked(avatarProtoRef))
-                        result = BuyItemResultErrorCodes.BUY_RESULT_ERROR_ALREADY_HAVE_AVATAR;
-                    else if (player.UnlockAvatar(avatarProtoRef, true))
-                        result = BuyItemResultErrorCodes.BUY_RESULT_ERROR_SUCCESS;
-                    break;
+                switch (catalogItemProto)
+                {
+                    case ItemPrototype itemProto:
+                        bool allGranted = true;
+                        for (int i = 0; i < quantity; i++)
+                        {
+                            if (!player.Game.LootManager.GiveItem(itemProto.DataRef, LootContext.CashShop, player))
+                            {
+                                
+                                Logger.Warn($"BuyItem(): Failed to grant item {itemProto.DataRef.GetName()} (iteration {i + 1}/{quantity}) for SkuId {skuId}.");
+                                allGranted = false;
+                                break;
+                            }
+                        }
+                        if (allGranted)
+                            fulfillmentResult = BuyItemResultErrorCodes.BUY_RESULT_ERROR_SUCCESS;
+                        break;
 
-                case AgentTeamUpPrototype teamUpProto:
-                    PrototypeId teamUpProtoRef = teamUpProto.DataRef;
-                    if (player.IsTeamUpAgentUnlocked(teamUpProtoRef))
-                        result = BuyItemResultErrorCodes.BUY_RESULT_ERROR_ALREADY_HAVE_AVATAR;
-                    else if (player.UnlockTeamUpAgent(teamUpProtoRef, true))
-                        result = BuyItemResultErrorCodes.BUY_RESULT_ERROR_SUCCESS;
-                    break;
+                    case PlayerStashInventoryPrototype siProto:
+                        if (player.UnlockInventory(siProto.DataRef) || player.IsInventoryUnlocked(siProto.DataRef))
+                            fulfillmentResult = BuyItemResultErrorCodes.BUY_RESULT_ERROR_SUCCESS;
+                        break;
 
-                default:
-                    // Return error for unhandled SKU types
-                    Logger.Warn($"OnBuyItemFromCatalog(): Unimplemented catalog item type {catalogItemProto.GetType().Name} for {catalogItemProto}", LogCategory.MTXStore);
-                    break;
+                    case AvatarPrototype avatarProto:
+                        if (player.HasAvatarFullyUnlocked(avatarProto.DataRef))
+                            fulfillmentResult = BuyItemResultErrorCodes.BUY_RESULT_ERROR_ALREADY_HAVE_AVATAR;
+                        else if (player.UnlockAvatar(avatarProto.DataRef, true))
+                            fulfillmentResult = BuyItemResultErrorCodes.BUY_RESULT_ERROR_SUCCESS;
+                        break;
+
+                    case AgentTeamUpPrototype teamUpProto:
+                        if (player.IsTeamUpAgentUnlocked(teamUpProto.DataRef))
+                            fulfillmentResult = BuyItemResultErrorCodes.BUY_RESULT_ERROR_ALREADY_HAVE_AVATAR;
+                        else if (player.UnlockTeamUpAgent(teamUpProto.DataRef, true))
+                            fulfillmentResult = BuyItemResultErrorCodes.BUY_RESULT_ERROR_SUCCESS;
+                        break;
+
+                    default:
+                        Logger.Warn($"BuyItem(): Unimplemented catalog item type {catalogItemProto.GetType().Name} for {catalogItemProto}", LogCategory.MTXStore);
+                        break;
+                }
+
+                if (fulfillmentResult != BuyItemResultErrorCodes.BUY_RESULT_ERROR_SUCCESS)
+                {
+                   
+                    Logger.Warn($"BuyItem(): Failed to fulfill item {catalogItemProto.DataRef.GetName()} (Quantity: {quantity}) for SkuId {skuId}. Error: {fulfillmentResult}. Halting transaction.");
+                    return fulfillmentResult;
+                }
             }
 
-            if (result != BuyItemResultErrorCodes.BUY_RESULT_ERROR_SUCCESS)
-                return result;
-
-            // Adjust currency balance (do not allow negative balance in case somebody figures out some kind of exploit to get here)
+            // --- 4. Finalization ---
             balance = Math.Max(balance - itemPrice, 0);
             player.GazillioniteBalance = balance;
-            Logger.Trace($"OnBuyItemFromCatalog(): Player [{player}] purchased [skuId={skuId}, catalogItemProto={catalogItemProto}, itemPrice={itemPrice}]. Balance={balance}", LogCategory.MTXStore);
+            var grantedItemsString = string.Join(", ", itemsToGrant.Select(kvp => {
+                
+                return $"{kvp.Key.GetName() ?? "Unknown"} x{kvp.Value}";
+            }));
+            Logger.Trace($"OnBuyItemFromCatalog(): Player [{player}] purchased [skuId={skuId}, itemPrice={itemPrice}]. Granted: [{grantedItemsString}]. New Balance={balance}", LogCategory.MTXStore);
 
             return BuyItemResultErrorCodes.BUY_RESULT_ERROR_SUCCESS;
         }
