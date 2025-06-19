@@ -1987,6 +1987,37 @@ namespace MHServerEmu.Games.Entities
             return HasAvatarAsStarter(avatar.PrototypeDataRef) && avatar.CharacterLevel >= Avatar.GetStarterAvatarLevelCap();
         }
 
+        public bool HasAvatarEmoteUnlocked(PrototypeId avatarProtoRef, PrototypeId emoteProtoRef)
+        {
+            return Properties.HasProperty(new PropertyId(PropertyEnum.AvatarEmoteUnlocked, avatarProtoRef, emoteProtoRef));
+        }
+
+        public bool UnlockAvatarEmote(PrototypeId avatarProtoRef, PrototypeId emoteProtoRef)
+        {
+            AvatarPrototype avatarProto = avatarProtoRef.As<AvatarPrototype>();
+            if (avatarProto == null) return Logger.WarnReturn(false, "UnlockAvatarEmote(): avatarProto == null");
+
+            PowerPrototype emoteProto = emoteProtoRef.As<PowerPrototype>();
+            if (emoteProto == null) return Logger.WarnReturn(false, "UnlockAvatarEmote(): emoteProto == null");
+            if (emoteProto.PowerCategory != PowerCategoryType.EmotePower) return Logger.WarnReturn(false, "UnlockAvatarEmote(): emoteProto.PowerCategory != PowerCategoryType.EmotePower");
+
+            if (HasAvatarEmoteUnlocked(avatarProtoRef, emoteProtoRef))
+                return Logger.WarnReturn(false, $"UnlockAvatarEmote(): Player [{this}] is attempting to unlock emote {emoteProtoRef.GetNameFormatted()} for {avatarProtoRef.GetNameFormatted()} that is already unlocked");
+
+            Properties[PropertyEnum.AvatarEmoteUnlocked, avatarProtoRef, emoteProtoRef] = true;
+
+            // Assign the newly unlocked emote power if needed
+            Avatar avatar = CurrentAvatar;
+            if (avatar != null && avatar.PrototypeDataRef == avatarProtoRef && avatar.IsInWorld && avatar.GetPower(emoteProtoRef) == null)
+            {
+                PowerIndexProperties indexProps = new(0, avatar.CharacterLevel, avatar.CombatLevel);
+                if (avatar.AssignPower(emoteProtoRef, indexProps) == null)
+                    return Logger.WarnReturn(false, $"UnlockAvatarEmote(): Failed to assign emote power {emoteProtoRef.GetNameFormatted()} to avatar [{avatar}]");
+            }
+
+            return true;
+        }
+
         public AvatarUnlockType GetAvatarUnlockType(PrototypeId avatarRef)
         {
             var avatarProto = GameDatabase.GetPrototype<AvatarPrototype>(avatarRef);
@@ -2971,13 +3002,17 @@ namespace MHServerEmu.Games.Entities
             SendMessage(message);
         }
 
-        public void SendOpenUIPanel(AssetId panelNameId)
+        public bool SendOpenUIPanel(AssetId panelNameId)
         {
-            if (panelNameId == AssetId.Invalid) return;
+            if (panelNameId == AssetId.Invalid) return Logger.WarnReturn(false, "SendOpenUIPanel(): panelNameId == AssetId.Invalid");
+
             string panelName = GameDatabase.GetAssetName(panelNameId);
-            if (panelName == "Unknown") return;
-            var message = NetMessageOpenUIPanel.CreateBuilder().SetPanelName(panelName).Build();
+            if (panelName == "Unknown") return Logger.WarnReturn(false, "SendOpenUIPanel(): panelName == Unknown");
+
+            NetMessageOpenUIPanel message = NetMessageOpenUIPanel.CreateBuilder().SetPanelName(panelName).Build();
             SendMessage(message);
+
+            return true;
         }
 
         public void SendWaypointNotification(PrototypeId waypointRef, bool show = true)

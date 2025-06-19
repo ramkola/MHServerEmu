@@ -103,11 +103,23 @@ namespace MHServerEmu.Games.Entities.Items
                     break;
 
                 case ItemActionType.AwardTeamUpXP:
-                    wasUsed |= DoItemActionAwardTeamUpXP();
+                    if (actionProto is not ItemActionAwardTeamUpXPPrototype awardTeamUpXPProto)
+                    {
+                        Logger.Warn("TriggerItemActionOnUse(): actionProto is not ItemActionAwardTeamUpXPPrototype awardTeamUpXPProto");
+                        return;
+                    }
+
+                    wasUsed |= DoItemActionAwardTeamUpXP(avatar, awardTeamUpXPProto.XP);
                     break;
 
                 case ItemActionType.OpenUIPanel:
-                    wasUsed |= DoItemActionOpenUIPanel();
+                    if (actionProto is not ItemActionOpenUIPanelPrototype openUIPanelProto)
+                    {
+                        Logger.Warn("TriggerItemActionOnUse(): actionProto is not ItemActionOpenUIPanelPrototype openUIPanelProto");
+                        return;
+                    }
+
+                    wasUsed |= DoItemActionOpenUIPanel(player, openUIPanelProto.PanelName);
                     break;
             }
         }
@@ -261,16 +273,19 @@ namespace MHServerEmu.Games.Entities.Items
             return avatar.ActivatePower(powerProtoRef, ref settings) == PowerUseResult.Success;
         }
 
-        private bool DoItemActionAwardTeamUpXP()
+        private bool DoItemActionAwardTeamUpXP(Avatar avatar, int amount)
         {
-            Logger.Debug($"DoItemActionAwardTeamUpXP(): {this}");
-            return false;
+            Agent teamUpAgent = avatar.CurrentTeamUpAgent;
+            if (teamUpAgent == null)
+                return false;
+
+            teamUpAgent.AwardXP(amount, 0, true);
+            return true;
         }
 
-        private bool DoItemActionOpenUIPanel()
+        private bool DoItemActionOpenUIPanel(Player player, AssetId panelNameId)
         {
-            Logger.Debug($"DoItemActionOpenUIPanel(): {this}");
-            return false;
+            return player.SendOpenUIPanel(panelNameId);
         }
 
         private bool ReplaceSelfHelper(LootResultSummary lootResultSummary, Player player, NetMessageLootRewardReport.Builder reportBuilder)
