@@ -2374,7 +2374,7 @@ namespace MHServerEmu.Games.Entities
 
         public void OnFullscreenMovieStarted(PrototypeId movieRef)
         {
-            Logger.Trace($"OnFullscreenMovieStarted {GameDatabase.GetFormattedPrototypeName(movieRef)} for {_playerName}");
+            //Logger.Trace($"OnFullscreenMovieStarted {GameDatabase.GetFormattedPrototypeName(movieRef)} for {_playerName}");
             var movieProto = GameDatabase.GetPrototype<FullscreenMoviePrototype>(movieRef);
             if (movieProto == null) return;
             if (movieProto.MovieType == MovieType.Cinematic)
@@ -2388,7 +2388,7 @@ namespace MHServerEmu.Games.Entities
         {
             if (syncRequestId != 0 && syncRequestId < FullscreenMovieSyncRequestId) return;
 
-            Logger.Trace($"OnFullscreenMovieFinished {GameDatabase.GetFormattedPrototypeName(movieRef)} Canceled = {userCancelled} by {_playerName}");
+            //Logger.Trace($"OnFullscreenMovieFinished {GameDatabase.GetFormattedPrototypeName(movieRef)} Canceled = {userCancelled} by {_playerName}");
 
             var movieProto = GameDatabase.GetPrototype<FullscreenMoviePrototype>(movieRef);
             if (movieProto == null) return;

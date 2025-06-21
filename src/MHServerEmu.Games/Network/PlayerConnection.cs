@@ -1158,12 +1158,16 @@ namespace MHServerEmu.Games.Network
             var useWaypoint = message.As<NetMessageUseWaypoint>();
             if (useWaypoint == null) return Logger.WarnReturn(false, $"OnUseWaypoint(): Failed to retrieve message");
 
-            Logger.Trace(string.Format("OnUseWaypoint(): waypointDataRef={0}, regionProtoId={1}, difficultyProtoId={2}",
-                GameDatabase.GetPrototypeName((PrototypeId)useWaypoint.WaypointDataRef),
-                GameDatabase.GetPrototypeName((PrototypeId)useWaypoint.RegionProtoId),
-                GameDatabase.GetPrototypeName((PrototypeId)useWaypoint.DifficultyProtoId)));
+            Avatar avatar = Player.GetActiveAvatarByIndex(useWaypoint.AvatarIndex);
+            if (avatar == null) return Logger.WarnReturn(false, "OnUseWaypoint(): avatar == null");
 
-            // TODO: Do the usual interaction validation
+            if (avatar.IsAliveInWorld == false) return Logger.WarnReturn(false, "OnUseWaypoint(): avatar.IsAliveInWorld == false");
+
+            Transition waypoint = Game.EntityManager.GetEntity<Transition>(useWaypoint.IdTransitionEntity);
+            if (waypoint == null) return Logger.WarnReturn(false, "OnUseWaypoint(): waypoint == null");
+
+            if (avatar.InInteractRange(waypoint, InteractionMethod.Use) == false)
+                return Logger.WarnReturn(false, $"OnUseWaypoint(): Avatar [{avatar}] is not in interact range of waypoint [{waypoint}]");
 
             MoveToTarget((PrototypeId)useWaypoint.WaypointDataRef, (PrototypeId)useWaypoint.RegionProtoId);
             return true;
@@ -1173,9 +1177,6 @@ namespace MHServerEmu.Games.Network
         {
             var switchAvatar = message.As<NetMessageSwitchAvatar>();
             if (switchAvatar == null) return Logger.WarnReturn(false, $"OnSwitchAvatar(): Failed to retrieve message");
-
-            PrototypeId avatarProtoRef = (PrototypeId)switchAvatar.AvatarPrototypeId;
-            Logger.Info($"OnSwitchAvatar(): player=[{this}], avatarProtoRef=[{avatarProtoRef.GetName()}]");
 
             // Start the avatar switching process
             if (Player.BeginAvatarSwitch((PrototypeId)switchAvatar.AvatarPrototypeId) == false)
