@@ -140,6 +140,10 @@ namespace MHServerEmu.Billing
             if (entry == null || (entry.GuidItems.Length == 0 && entry.AdditionalGuidItems.Length == 0))
                 return BuyItemResultErrorCodes.BUY_RESULT_ERROR_UNKNOWN;
 
+            // Bundles don't work properly yet, so disable them for now
+            if (entry.Type?.Name == "Bundle")
+                return result;
+
             if (entry.LocalizedEntries.IsNullOrEmpty())
                 return BuyItemResultErrorCodes.BUY_RESULT_ERROR_UNKNOWN;
 
