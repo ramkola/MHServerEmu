@@ -9,6 +9,12 @@ using MHServerEmu.Games.GameData;
 using MHServerEmu.Games.GameData.Prototypes;
 using MHServerEmu.Games.Network;
 using System.Collections.Generic;
+using MHServerEmu.Games.Entities.Options;
+using System.Reflection;
+using System.Text;
+using System.Linq;
+using System;
+using MHServerEmu.Games.Properties;
 
 namespace MHServerEmu.Commands.Implementations
 {
@@ -24,18 +30,86 @@ namespace MHServerEmu.Commands.Implementations
         {
             PlayerConnection playerConnection = (PlayerConnection)client;
             if (playerConnection?.Player == null) return "Invalid player connection";
+            Player player = playerConnection.Player;
 
-            List<PrototypeId> stashRefs = ListPool<PrototypeId>.Instance.Get();
-            if (!playerConnection.Player.GetStashInventoryProtoRefs(stashRefs, false, true))
+            // Get the target stash name from parameters. It can contain spaces.
+            string targetStashName = @params.Length > 0 ? string.Join(" ", @params) : null;
+
+            // This list will hold all of the player's available stashes.
+            List<PrototypeId> allStashRefs = ListPool<PrototypeId>.Instance.Get();
+            if (!player.GetStashInventoryProtoRefs(allStashRefs, false, true))
             {
-                ListPool<PrototypeId>.Instance.Return(stashRefs);
+                ListPool<PrototypeId>.Instance.Return(allStashRefs);
                 return "No stash tabs available";
             }
 
-            _categoryStashMap.Clear();
-            int itemsMoved = SortItems(playerConnection.Player, stashRefs);
-            ListPool<PrototypeId>.Instance.Return(stashRefs);
+            // This list will be passed to the sorting logic. It will either contain all stashes,
+            // or the single stash specified by the user.
+            List<PrototypeId> stashesToSortInto = allStashRefs;
 
+            if (!string.IsNullOrEmpty(targetStashName))
+            {
+                targetStashName = DecodeUrlString(targetStashName);
+                Dictionary<string, PrototypeId> stashNameMap = new Dictionary<string, PrototypeId>(StringComparer.OrdinalIgnoreCase);
+
+                foreach (PrototypeId stashRef in allStashRefs)
+                {
+                    Inventory stash = player.GetInventoryByRef(stashRef);
+                    if (stash != null && (stash.Category == InventoryCategory.PlayerStashGeneral ||
+                                          stash.Category == InventoryCategory.PlayerStashAvatarSpecific ||
+                                          stash.Category == InventoryCategory.PlayerStashTeamUpGear ||
+                                          stash.Category == InventoryCategory.PlayerGeneralExtra ||
+                                          stash.Category == InventoryCategory.PlayerCraftingRecipes))
+                    {
+                        // Get custom display name from StashTabOptions
+                        StashTabOptions options = GetStashTabOptions(player, stash);
+                        string displayName = options?.DisplayName;
+
+                        if (!string.IsNullOrEmpty(displayName))
+                        {
+                            stashNameMap[DecodeUrlString(displayName)] = stash.PrototypeDataRef;
+                        }
+
+                        // Get generated name from the prototype
+                        string protoName = GameDatabase.GetPrototypeName(stash.PrototypeDataRef);
+                        string generatedName = GenerateStashName(stash, protoName);
+
+                        // Add the generated name to the map, allowing lookup by either name
+                        stashNameMap[DecodeUrlString(generatedName)] = stash.PrototypeDataRef;
+                    }
+                }
+
+                if (stashNameMap.TryGetValue(targetStashName, out PrototypeId foundStashRef))
+                {
+                    // Stash found. Create a new list containing only this stash.
+                    stashesToSortInto = new List<PrototypeId> { foundStashRef };
+
+                    // Return the original pooled list of all stashes since we are using a new list now.
+                    ListPool<PrototypeId>.Instance.Return(allStashRefs);
+                }
+                else
+                {
+                    // Stash not found, return an error.
+                    ListPool<PrototypeId>.Instance.Return(allStashRefs);
+                    return $"Stash tab '{targetStashName}' not found.";
+                }
+            }
+
+            _categoryStashMap.Clear();
+            int itemsMoved = SortItems(player, stashesToSortInto);
+
+            // If we used the original list of all stashes, we need to return it to the pool.
+            // If we created a new list for a single stash, we do not return it as it wasn't from the pool.
+            if (stashesToSortInto == allStashRefs)
+            {
+                ListPool<PrototypeId>.Instance.Return(stashesToSortInto);
+            }
+
+            // Return a message indicating what was done.
+            if (!string.IsNullOrEmpty(targetStashName))
+            {
+                return $"Sorted {itemsMoved} items to stash tab '{targetStashName}'";
+            }
             return $"Sorted {itemsMoved} items to stash tabs";
         }
 
@@ -86,6 +160,9 @@ namespace MHServerEmu.Commands.Implementations
                 if (processedItems.Contains(itemId)) continue;
                 Item item = entityManager.GetEntity<Item>(itemId);
                 if (item == null || !item.CanStack() || item.IsEquipped) continue;
+
+                if (item.IsBoundToCharacter) continue;
+
                 if (TryMoveToMatchingStack(player, item, stashRefs))
                 {
                     itemsMoved++;
@@ -93,22 +170,51 @@ namespace MHServerEmu.Commands.Implementations
                 }
             }
 
-            // Second pass: Handle avatar-bound items
-            if (avatarStashes.Count > 0)
+            // Second pass: Handle avatar-bound and unique items
+            foreach (ulong itemId in currentItems)
             {
-                foreach (ulong itemId in currentItems)
+                if (processedItems.Contains(itemId)) continue;
+                Item item = entityManager.GetEntity<Item>(itemId);
+                if (item == null || item.IsEquipped || item.CanStack()) continue; // Skip items already handled or stackable
+
+                string itemName = GameDatabase.GetPrototypeName(item.PrototypeDataRef);
+                bool moved = false;
+
+                // Try avatar-specific stashes first for any suitable item
+                if (avatarStashes.Count > 0)
                 {
-                    if (processedItems.Contains(itemId)) continue;
-                    Item item = entityManager.GetEntity<Item>(itemId);
-                    if (item == null || item.IsEquipped || !item.IsBoundToCharacter) continue;
                     foreach (var avatarStashRef in avatarStashes)
                     {
-                        if (TryMoveItemToStash(player, item, avatarStashRef))
+                        Inventory stash = player.GetInventoryByRef(avatarStashRef);
+                        if (stash == null) continue;
+
+                        // Get avatar name from stash and check if the item is suitable
+                        string stashProtoName = GameDatabase.GetPrototypeName(stash.PrototypeDataRef);
+                        string avatarName = ExtractAvatarNameFromStash(stashProtoName);
+
+                        if (!string.IsNullOrEmpty(avatarName) && !IsItemSuitableForAvatar(item, avatarName))
                         {
+                            continue; // This item doesn't belong in this hero's stash
+                        }
+
+                        if (TryMoveItemToStash(player, item, avatarStashRef, true))
+                        {
+                            Logger.Debug($"Successfully moved item '{itemName}' to matching avatar stash");
                             itemsMoved++;
                             processedItems.Add(itemId);
+                            moved = true;
                             break;
                         }
+                    }
+                }
+
+                // If not moved yet, try to find a suitable category stash
+                if (!moved)
+                {
+                    if (TryMoveToCategoryStash(player, item, stashRefs))
+                    {
+                        itemsMoved++;
+                        processedItems.Add(itemId);
                     }
                 }
             }
@@ -123,29 +229,45 @@ namespace MHServerEmu.Commands.Implementations
                     if (item == null || item.IsEquipped) continue;
                     if (GetItemCategory(item) == "Crafting")
                     {
+                        string itemName = GameDatabase.GetPrototypeName(item.PrototypeDataRef);
+                        bool moved = false;
                         foreach (var craftingStashRef in craftingStashes)
                         {
-                            if (TryMoveItemToStash(player, item, craftingStashRef))
+                            if (TryMoveItemToStash(player, item, craftingStashRef, false))
                             {
                                 itemsMoved++;
                                 processedItems.Add(itemId);
+                                moved = true;
                                 break;
+                            }
+                        }
+
+                        if (!moved && generalStashes.Count > 0)
+                        {
+                            foreach (var generalStashRef in generalStashes)
+                            {
+                                if (TryMoveItemToStash(player, item, generalStashRef, false))
+                                {
+                                    itemsMoved++;
+                                    processedItems.Add(itemId);
+                                    moved = true;
+                                    break;
+                                }
                             }
                         }
                     }
                 }
             }
 
-            // Final pass: Categorize and move all remaining items into general stashes
-            if (generalStashes.Count > 0)
+            // Final pass: Categorize and move all remaining items
+            foreach (ulong itemId in currentItems)
             {
-                foreach (ulong itemId in currentItems)
+                if (processedItems.Contains(itemId)) continue;
+                Item item = entityManager.GetEntity<Item>(itemId);
+                if (item == null || item.IsEquipped) continue;
+                if (TryMoveToCategoryStash(player, item, stashRefs))
                 {
-                    if (processedItems.Contains(itemId)) continue;
-                    Item item = entityManager.GetEntity<Item>(itemId);
-                    if (item == null || item.IsEquipped) continue;
-                    if (TryMoveToCategoryStash(player, item, generalStashes))
-                        itemsMoved++;
+                    itemsMoved++;
                 }
             }
 
@@ -161,7 +283,6 @@ namespace MHServerEmu.Commands.Implementations
 
         private bool TryMoveToMatchingStack(Player player, Item item, List<PrototypeId> stashRefs)
         {
-            // Cache the EntityManager for performance
             var entityManager = player.Game.EntityManager;
             string itemName = GameDatabase.GetPrototypeName(item.PrototypeDataRef);
             foreach (PrototypeId stashRef in stashRefs)
@@ -174,14 +295,24 @@ namespace MHServerEmu.Commands.Implementations
                     Item targetItem = entityManager.GetEntity<Item>(entry.Id);
                     if (targetItem != null && item.CanStackOnto(targetItem))
                     {
-                        item.SetStatus(EntityStatus.SkipItemBindingCheck, true);
-                        bool success = player.TryInventoryMove(item.Id, stash.OwnerId, stash.PrototypeDataRef, entry.Slot);
-                        item.SetStatus(EntityStatus.SkipItemBindingCheck, false);
+                        bool needsBindingSkip = item.IsBoundToCharacter;
+                        if (needsBindingSkip)
+                            item.SetStatus(EntityStatus.SkipItemBindingCheck, true);
 
-                        if (success)
+                        try
                         {
-                            Logger.Debug($"Stacked item '{itemName}' onto existing stack in stash '{GameDatabase.GetPrototypeName(stash.PrototypeDataRef)}'");
-                            return true;
+                            bool success = player.TryInventoryMove(item.Id, stash.OwnerId, stash.PrototypeDataRef, entry.Slot);
+                            if (success)
+                            {
+                                Logger.Debug($"Stacked item '{itemName}' onto existing stack in stash '{GameDatabase.GetPrototypeName(stash.PrototypeDataRef)}'");
+                                return true;
+                            }
+                            return false;
+                        }
+                        finally
+                        {
+                            if (needsBindingSkip)
+                                item.SetStatus(EntityStatus.SkipItemBindingCheck, false);
                         }
                     }
                 }
@@ -193,7 +324,6 @@ namespace MHServerEmu.Commands.Implementations
         {
             string itemName = GameDatabase.GetPrototypeName(item.PrototypeDataRef);
             string category = GetItemCategory(item);
-            Logger.Debug($"Processing item '{itemName}' of category '{category}'");
 
             if (!_categoryStashMap.TryGetValue(category, out List<PrototypeId> categoryStashes))
             {
@@ -201,14 +331,12 @@ namespace MHServerEmu.Commands.Implementations
                 _categoryStashMap[category] = categoryStashes;
             }
 
-            // Try to get existing category stash
             foreach (PrototypeId stashRef in categoryStashes)
             {
-                if (TryMoveItemToStash(player, item, stashRef))
+                if (TryMoveItemToStash(player, item, stashRef, item.IsBoundToCharacter))
                     return true;
             }
 
-            // Find new empty stash for category
             foreach (PrototypeId stashRef in stashRefs)
             {
                 if (categoryStashes.Contains(stashRef)) continue;
@@ -217,13 +345,12 @@ namespace MHServerEmu.Commands.Implementations
                 if (stash == null || !IsStashEmpty(stash)) continue;
 
                 categoryStashes.Add(stashRef);
-                return TryMoveItemToStash(player, item, stashRef);
+                return TryMoveItemToStash(player, item, stashRef, item.IsBoundToCharacter);
             }
 
-            // Fall back to any available stash
             foreach (PrototypeId stashRef in stashRefs)
             {
-                if (TryMoveItemToStash(player, item, stashRef))
+                if (TryMoveItemToStash(player, item, stashRef, item.IsBoundToCharacter))
                 {
                     if (!categoryStashes.Contains(stashRef))
                         categoryStashes.Add(stashRef);
@@ -234,7 +361,7 @@ namespace MHServerEmu.Commands.Implementations
             return false;
         }
 
-        private bool TryMoveItemToStash(Player player, Item item, PrototypeId stashRef)
+        private bool TryMoveItemToStash(Player player, Item item, PrototypeId stashRef, bool skipBindingCheck)
         {
             Inventory stash = player.GetInventoryByRef(stashRef);
             if (stash == null) return false;
@@ -242,11 +369,20 @@ namespace MHServerEmu.Commands.Implementations
             uint targetSlot = stash.GetFreeSlot(item, true, true);
             if (targetSlot == Inventory.InvalidSlot) return false;
 
-            item.SetStatus(EntityStatus.SkipItemBindingCheck, true);
-            bool success = player.TryInventoryMove(item.Id, stash.OwnerId, stash.PrototypeDataRef, targetSlot);
-            item.SetStatus(EntityStatus.SkipItemBindingCheck, false);
+            bool needsBindingSkip = skipBindingCheck && item.IsBoundToCharacter;
 
-            return success;
+            if (needsBindingSkip)
+                item.SetStatus(EntityStatus.SkipItemBindingCheck, true);
+
+            try
+            {
+                return player.TryInventoryMove(item.Id, stash.OwnerId, stash.PrototypeDataRef, targetSlot);
+            }
+            finally
+            {
+                if (needsBindingSkip)
+                    item.SetStatus(EntityStatus.SkipItemBindingCheck, false);
+            }
         }
 
         private string GetItemCategory(Item item)
@@ -285,12 +421,19 @@ namespace MHServerEmu.Commands.Implementations
             return true;
         }
 
+        private int GetStashItemCount(Inventory stash)
+        {
+            int count = 0;
+            foreach (var entry in stash)
+                count++;
+            return count;
+        }
+
         private string CompactInventory(Player player)
         {
             Inventory generalInventory = player.GetInventory(InventoryConvenienceLabel.General);
             if (generalInventory == null) return "No general inventory found";
 
-            // Cache the EntityManager for performance
             var entityManager = player.Game.EntityManager;
             List<ulong> currentItems = ListPool<ulong>.Instance.Get();
             int itemsCompacted = 0;
@@ -304,17 +447,166 @@ namespace MHServerEmu.Commands.Implementations
                 Item item = entityManager.GetEntity<Item>(itemId);
                 if (item == null || item.IsEquipped) continue;
 
-                item.SetStatus(EntityStatus.SkipItemBindingCheck, true);
-                if (player.TryInventoryMove(itemId, generalInventory.OwnerId, generalInventory.PrototypeDataRef, nextSlot))
+                bool needsBindingSkip = item.IsBoundToCharacter;
+
+                if (needsBindingSkip)
+                    item.SetStatus(EntityStatus.SkipItemBindingCheck, true);
+
+                try
                 {
-                    itemsCompacted++;
-                    nextSlot++;
+                    if (player.TryInventoryMove(itemId, generalInventory.OwnerId, generalInventory.PrototypeDataRef, nextSlot))
+                    {
+                        itemsCompacted++;
+                        nextSlot++;
+                    }
                 }
-                item.SetStatus(EntityStatus.SkipItemBindingCheck, false);
+                finally
+                {
+                    if (needsBindingSkip)
+                        item.SetStatus(EntityStatus.SkipItemBindingCheck, false);
+                }
             }
 
             ListPool<ulong>.Instance.Return(currentItems);
             return $"Compacted {itemsCompacted} items in inventory";
         }
+
+        #region Helper Methods
+
+        private static readonly FieldInfo StashTabOptionsField = typeof(Player).GetField("_stashTabOptionsDict",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+
+        private StashTabOptions GetStashTabOptions(Player player, Inventory stash)
+        {
+            if (StashTabOptionsField == null || player == null || stash == null)
+                return null;
+
+            var stashTabOptionsDict = StashTabOptionsField.GetValue(player) as Dictionary<PrototypeId, StashTabOptions>;
+            if (stashTabOptionsDict?.TryGetValue(stash.PrototypeDataRef, out StashTabOptions options) == true)
+            {
+                if (!string.IsNullOrEmpty(options.DisplayName))
+                {
+                    options.DisplayName = DecodeUrlString(options.DisplayName);
+                }
+                return options;
+            }
+
+            return null;
+        }
+
+        private string GenerateStashName(Inventory stash, string protoName)
+        {
+            if (protoName.Contains("PlayerStashForAvatar"))
+            {
+                int startIndex = protoName.IndexOf("PlayerStashForAvatar") + "PlayerStashForAvatar".Length;
+                if (startIndex < protoName.Length)
+                {
+                    return protoName.Substring(startIndex).Replace("/", "").Trim();
+                }
+            }
+
+            if (protoName.Contains("PlayerStashCrafting"))
+            {
+                int startIndex = protoName.IndexOf("PlayerStashCrafting") + "PlayerStashCrafting".Length;
+                if (startIndex < protoName.Length)
+                {
+                    return $"Crafting{protoName.Substring(startIndex).Replace("/", "").Trim()}";
+                }
+                return "Crafting";
+            }
+
+            if (protoName.Contains("PlayerStashGeneral"))
+            {
+                if (protoName.Contains("EternitySplinter")) return "GeneralEternity";
+                if (protoName.Contains("Anniversary")) return "GeneralAnniversary";
+
+                int startIndex = protoName.IndexOf("PlayerStashGeneral") + "PlayerStashGeneral".Length;
+                if (startIndex < protoName.Length)
+                {
+                    string number = protoName.Substring(startIndex).Replace("/", "").Trim();
+                    if (int.TryParse(number, out _))
+                    {
+                        return $"General{number}";
+                    }
+                }
+                return "General";
+            }
+
+            if (protoName.Contains("PlayerStashTeamUpGeneral"))
+            {
+                int startIndex = protoName.IndexOf("PlayerStashTeamUpGeneral") + "PlayerStashTeamUpGeneral".Length;
+                if (startIndex < protoName.Length)
+                {
+                    return $"TeamUp{protoName.Substring(startIndex).Replace("/", "").Trim()}";
+                }
+                return "TeamUp";
+            }
+
+            return stash.Category.ToString();
+        }
+
+        private string DecodeUrlString(string input)
+        {
+            if (string.IsNullOrEmpty(input))
+                return input;
+
+            return input.Replace("%20", " ").Replace("%2F", "/").Replace("%3A", ":").Replace("%2D", "-");
+        }
+
+        // Helper method to extract avatar name from stash prototype name
+        private string ExtractAvatarNameFromStash(string stashProtoName)
+        {
+            if (stashProtoName.Contains("PlayerStashForAvatar"))
+            {
+                int startIndex = stashProtoName.IndexOf("PlayerStashForAvatar") + "PlayerStashForAvatar".Length;
+                if (startIndex < stashProtoName.Length)
+                {
+                    string avatarName = stashProtoName.Substring(startIndex);
+                    // Clean up any remaining path parts or special characters
+                    avatarName = avatarName.Replace("/", "").Trim();
+                    return avatarName;
+                }
+            }
+            return string.Empty;
+        }
+
+        // Helper method to check if an item is suitable for an avatar-specific stash
+        private bool IsItemSuitableForAvatar(Item item, string avatarName)
+        {
+            if (item == null || string.IsNullOrEmpty(avatarName))
+                return false;
+
+            // Get the item prototype name
+            string itemProtoName = GameDatabase.GetPrototypeName(item.PrototypeDataRef).ToLowerInvariant();
+
+            // Create a mapping of avatar names to their possible variations
+            Dictionary<string, List<string>> avatarVariations = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "DrDoom.prototype", new List<string> { "doctordoom", "drdoom", "doom" } },
+                { "DrStrange.prototype", new List<string> { "doctorstrange", "drstrange" } },
+                { "Spiderman.prototype", new List<string> { "spiderman", "spider-man" } },
+                { "StarLord.prototype", new List<string> { "starlord", "star-lord" } },
+                { "InvisiWoman.prototype", new List<string> { "invisiblewoman", "invisiwoman" } },
+            };
+
+            // Check if the avatar name exists in our mapping
+            if (avatarVariations.TryGetValue(avatarName, out List<string> variations))
+            {
+                // Check if the item name contains any of the avatar variations
+                foreach (string variation in variations)
+                {
+                    if (itemProtoName.Contains(variation))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            // If no specific mapping, just check if the item name contains the avatar name without .prototype
+            string baseAvatarName = avatarName.Replace(".prototype", "").ToLowerInvariant();
+            return itemProtoName.Contains(baseAvatarName);
+        }
+
+        #endregion
     }
 }
