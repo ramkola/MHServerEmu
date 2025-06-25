@@ -49,6 +49,9 @@
     <None Update="Data\Game\Patches\Off\PatchDataCarnival.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Update="Data\Game\Patches\PatchDataLootCooldowns.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
     <None Update="Data\Game\Patches\Off\PatchDataTestOverrideLoot.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
@@ -63,9 +66,6 @@
     </None>
     <None Update="Data\Game\LiveTuningDataBugFixes.json">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-    </None>
-    <None Update="Data\Game\LootDropWeightMultiplierOverrides.json">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
     <None Update="Data\Game\Patches\PatchDataRestoredContent.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
