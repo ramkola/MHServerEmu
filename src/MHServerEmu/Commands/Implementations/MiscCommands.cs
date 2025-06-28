@@ -10,8 +10,27 @@ using MHServerEmu.Games.Powers;
 
 namespace MHServerEmu.Commands.Implementations
 {
-    [CommandGroup("tower")]
+    [CommandGroup("towerold")]
     [CommandGroupDescription("Teleports to Avengers Tower (original).")]
+    [CommandGroupUserLevel(AccountUserLevel.Admin)]
+    [CommandGroupFlags(CommandGroupFlags.SingleCommand)]
+    public class OldTowerCommand : CommandGroup
+    {
+        [DefaultCommand]
+        [CommandInvokerType(CommandInvokerType.Client)]
+        public string Towerold(string[] @params, NetClient client)
+        {
+            PlayerConnection playerConnection = (PlayerConnection)client;
+
+            // Regions/HUBS/AvengersTowerHUB/Portals/AvengersTowerHUBEntry.prototype
+            playerConnection.MoveToTarget((PrototypeId)16780605467179883619);
+
+            return "Teleporting to Avengers Tower (original)";
+        }
+    }
+
+    [CommandGroup("tower")]
+    [CommandGroupDescription("Teleports to Avengers Tower.")]
     [CommandGroupFlags(CommandGroupFlags.SingleCommand)]
     public class TowerCommand : CommandGroup
     {
@@ -21,10 +40,10 @@ namespace MHServerEmu.Commands.Implementations
         {
             PlayerConnection playerConnection = (PlayerConnection)client;
 
-            // Regions/HUBS/AvengersTowerHUB/Portals/AvengersTowerHUBEntry.prototype
-            playerConnection.MoveToTarget((PrototypeId)16780605467179883619);
+            // Regions/HUBS/AvengersTowerHUB/Portals/NPEAvengersTowerHUBEntry.prototype
+            playerConnection.MoveToTarget((PrototypeId)11334277059865941394);
 
-            return "Teleporting to Avengers Tower (original)";
+            return "Teleporting to Avengers Tower";
         }
     }
 
@@ -46,6 +65,23 @@ namespace MHServerEmu.Commands.Implementations
             return "Teleporting to East Side: Detention Facility (old)";
         }
     }
+    [CommandGroup("Strange")]
+    [CommandGroupDescription("Teleports to CosmicDrstrange.")]
+    [CommandGroupFlags(CommandGroupFlags.SingleCommand)]
+    public class WinterCommand : CommandGroup
+    {
+        [DefaultCommand]
+        [CommandInvokerType(CommandInvokerType.Client)]
+        public string Strange(string[] @params, NetClient client)
+        {
+            PlayerConnection playerConnection = (PlayerConnection)client;
+
+            playerConnection.MoveToTarget((PrototypeId)10332456036148718712);
+
+            return "Teleporting to New York.";
+        }
+    }
+   
 
     [CommandGroup("position")]
     [CommandGroupDescription("Shows current position.")]
