@@ -387,6 +387,7 @@ namespace MHServerEmu.Games.Entities.Avatars
                     return Logger.WarnReturn(ChangePositionResult.InvalidPosition, $"ChangeRegionPosition(): Invalid position {position.Value}");
 
                 player.BeginTeleport(RegionLocation.RegionId, position.Value, orientation != null ? orientation.Value : Orientation.Zero);
+                ConditionCollection.RemoveCancelOnIntraRegionTeleportConditions();
                 ExitWorld();
                 player.AOI.Update(position.Value);
                 result = ChangePositionResult.Teleport;
@@ -846,9 +847,15 @@ namespace MHServerEmu.Games.Entities.Avatars
                 }
 
                 // Invoke the AvatarUsedPowerEvent
-                var player = GetOwnerOfType<Player>();
-                if (player != null)
-                    Region?.AvatarUsedPowerEvent.Invoke(new(player, this, powerRef, settings.TargetEntityId));
+                Player player = GetOwnerOfType<Player>();
+                Region region = Region;
+                if (player != null && region != null)
+                {
+                    region.AvatarUsedPowerEvent.Invoke(new(player, this, powerRef, settings.TargetEntityId));
+
+                    if (powerProto.PowerCategory == PowerCategoryType.EmotePower)
+                        region.EmotePerformedEvent.Invoke(new(player, powerRef));
+                }
             }
             else
             {
