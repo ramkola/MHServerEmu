@@ -1,5 +1,4 @@
-﻿using Gazillion;
-using Google.ProtocolBuffers;
+using Gazillion;
 using MHServerEmu.Core.Config;
 using MHServerEmu.Core.Extensions;
 using MHServerEmu.Core.Helpers;
@@ -7,7 +6,6 @@ using MHServerEmu.Core.Logging;
 using MHServerEmu.Core.Memory;
 using MHServerEmu.Core.Metrics;
 using MHServerEmu.Core.Network;
-using MHServerEmu.Core.Network.Tcp;
 using MHServerEmu.Core.System.Random;
 using MHServerEmu.Core.System.Time;
 using MHServerEmu.Games.Common;
@@ -22,6 +20,7 @@ using MHServerEmu.Games.GameData.Prototypes;
 using MHServerEmu.Games.Loot;
 using MHServerEmu.Games.MetaGames;
 using MHServerEmu.Games.Network;
+using MHServerEmu.Games.Network.InstanceManagement;
 using MHServerEmu.Games.Powers;
 using MHServerEmu.Games.Regions;
 using MHServerEmu.Games.Social;
@@ -33,7 +32,7 @@ namespace MHServerEmu.Games
 {
     public enum GameShutdownReason
     {
-        ServerShuttingDown,
+        ShutdownRequested,
         GameInstanceCrash
     }
 
@@ -66,8 +65,9 @@ namespace MHServerEmu.Games
 
         private ulong _currentRepId;
 
-        // Dumped ids: 0xF9E00000FA2B3EA (Lobby), 0xFF800000FA23AE9 (Tower), 0xF4A00000FA2B47D (Danger Room), 0xFCC00000FA29FE7 (Midtown)
         public ulong Id { get; }
+        public GameManager GameManager { get; }
+
         public bool IsRunning { get; private set; } = false;
         public bool HasBeenShutDown { get; private set; } = false;
 
@@ -104,16 +104,16 @@ namespace MHServerEmu.Games
         public bool LeaderboardsEnabled { get; set; }
         public bool InfinitySystemEnabled { get => GameOptions.InfinitySystemEnabled; }
         
-        public int PlayerCount { get => EntityManager.PlayerCount; }
-
+        
         public override string ToString() => $"serverGameId=0x{Id:X}";
        
-        public Game(ulong id)
+        public Game(ulong id, GameManager gameManager)
         {
+            Id = id;
+            GameManager = gameManager;
+
             // Small lags are fine, and logging all of them creates too much noise
             _fixedTimeUpdateProcessTimeLogThreshold = FixedTimeBetweenUpdates * 2;
-
-            Id = id;
 
             // Initialize game options
             var config = ConfigManager.Instance.GetConfig<GameOptionsConfig>();
@@ -177,16 +177,19 @@ namespace MHServerEmu.Games
 
         public void Shutdown(GameShutdownReason reason)
         {
-            if (IsRunning == false || HasBeenShutDown)
+            if (HasBeenShutDown)
                 return;
 
             Logger.Info($"Game shutdown requested. Game={this}, Reason={reason}");
-
-            // Clean up network manager
             NetworkManager.SendAllPendingMessages();
-            foreach (PlayerConnection playerConnection in NetworkManager)
-                playerConnection.Disconnect();
-            NetworkManager.Update();        // We need this to process player saves (for now)
+            GameManager.OnGameShutdown(this);   // This will notify the PlayerManager and disconnect all players
+
+            // Wait for all players to leave the game
+            while (NetworkManager.Count > 0)
+            {
+                NetworkManager.Update();
+                Thread.Sleep(1);
+            }
 
             // Clean up entities
             EntityManager.DestroyAllEntities();
@@ -195,7 +198,7 @@ namespace MHServerEmu.Games
             // Clean up regions
             RegionManager.DestroyAllRegions();
 
-            // Mark this game as shut down for the player manager
+            // Mark this game as shut down
             HasBeenShutDown = true;
         }
 
@@ -304,7 +307,7 @@ namespace MHServerEmu.Games
                     Update();
                 }
 
-                Shutdown(GameShutdownReason.ServerShuttingDown);
+                Shutdown(GameShutdownReason.ShutdownRequested);
             }
             catch (Exception e)
             {

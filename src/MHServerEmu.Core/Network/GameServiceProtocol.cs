@@ -66,6 +66,39 @@ namespace MHServerEmu.Core.Network
 
 
 
+        #region Game Instances
+
+        public readonly struct GameInstanceOp(GameInstanceOp.OpType type, ulong gameId) : IGameServiceMessage
+        {
+            public enum OpType
+            {
+                Create,
+                CreateAck,
+                Shutdown,
+                ShutdownAck,
+            }
+
+            public readonly OpType Type = type;
+            public readonly ulong GameId = gameId;
+        }
+
+        public readonly struct GameInstanceClientOp(GameInstanceClientOp.OpType type, IFrontendClient client, ulong gameId) : IGameServiceMessage
+        {
+            public enum OpType
+            {
+                Add,
+                AddAck,
+                Remove,
+                RemoveAck,
+            }
+
+            public readonly OpType Type = type;
+            public readonly IFrontendClient Client = client;
+            public readonly ulong GameId = gameId;
+        }
+
+        #endregion
+
         #region Grouping Manager
 
         public readonly struct GroupingManagerChat(IFrontendClient client, NetMessageChat chat, int prestigeLevel, List<ulong> playerFilter) : IGameServiceMessage
