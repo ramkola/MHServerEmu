@@ -3378,7 +3378,7 @@ namespace MHServerEmu.Games.Entities
                 GiveLoginRewards(loginCount);
                 Properties[PropertyEnum.LoginCount] = loginCount;
                 ServerManager.Instance.SendMessageToService(
-    ServerType.GiftItemDistributor,
+    GameServiceType.GiftItemDistributor,
     new GameServiceProtocol.PlayerRequestsGifts(this.DatabaseUniqueId, this.Game.Id, this.GetName())
 );
             }

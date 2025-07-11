@@ -16,6 +16,7 @@ namespace MHServerEmu.Core.Network
         Billing,
         Frontend,
         Auth,
+        GiftItemDistributor,
         NumServiceTypes
     }
 

@@ -34,6 +34,7 @@ namespace MHServerEmu.Gifts
     /// </summary>
     public class GiftItemDistributor : IGameService
     {
+        public GameServiceState State { get; private set; }
         private static readonly Logger Logger = LogManager.CreateLogger();
         private static readonly string PendingItemsPath = Path.Combine(FileHelper.DataDirectory, "PendingItems.json");
         private static readonly object _ioLock = new();
@@ -81,7 +82,7 @@ namespace MHServerEmu.Gifts
             {
                 // Create the award message with the critical instance and player identification
                 var awardMessage = new GameServiceProtocol.AwardPlayerGifts(playerDbId, instanceId, giftsToAward);
-                ServerManager.Instance.SendMessageToService(ServerType.GameInstanceServer, awardMessage);
+                ServerManager.Instance.SendMessageToService(GameServiceType.GameInstance, awardMessage);
 
                 SaveChangesAsync().GetAwaiter().GetResult();
             }

@@ -16,6 +16,7 @@ using MHServerEmu.Games.GameData;
 using MHServerEmu.Games.GameData.LiveTuning;
 using MHServerEmu.Games.MTXStore;
 using MHServerEmu.Games.Network.InstanceManagement;
+using MHServerEmu.Gifts;
 using MHServerEmu.Grouping;
 using MHServerEmu.Leaderboards;
 using MHServerEmu.PlayerManagement;
@@ -90,7 +91,7 @@ namespace MHServerEmu
             serverManager.RegisterGameService(new BillingService(), GameServiceType.Billing);
             serverManager.RegisterGameService(new FrontendServer(), GameServiceType.Frontend);
             serverManager.RegisterGameService(new AuthServer(), GameServiceType.Auth);
-
+            serverManager.RegisterGameService(new GiftItemDistributor(), GameServiceType.GiftItemDistributor);
             serverManager.RunServices();
 
             // Begin processing console input

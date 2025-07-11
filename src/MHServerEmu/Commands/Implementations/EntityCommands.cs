@@ -209,9 +209,9 @@ namespace MHServerEmu.Commands.Implementations
                 entityPattern = @params[1];
 
                 // Find the target player
-                var playerManager = ServerManager.Instance.GetGameService(ServerType.PlayerManager) as PlayerManagerService;
+                var playerManager = ServerManager.Instance.GetGameService(GameServiceType.PlayerManager) as PlayerManagerService;
                 if (playerManager == null) return "Error: PlayerManagerService is not available.";
-                var groupingManager = ServerManager.Instance.GetGameService(ServerType.GroupingManager) as GroupingManagerService;
+                var groupingManager = ServerManager.Instance.GetGameService(GameServiceType.GroupingManager) as GroupingManagerService;
                 if (groupingManager == null) return "Error: GroupingManagerService is not available.";
 
                 if (!groupingManager.TryGetClient(targetPlayerName, out IFrontendClient targetFrontendClient))
