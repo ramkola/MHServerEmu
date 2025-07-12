@@ -1,26 +1,43 @@
-﻿using MHServerEmu.Core.Helpers;
+﻿
+using MHServerEmu.Core.Helpers;
 using MHServerEmu.Core.Logging;
 using MHServerEmu.Core.Memory;
+using MHServerEmu.Games.GameData.Calligraphy;
 using MHServerEmu.Games.GameData.Prototypes;
+using MHServerEmu.Games.Properties;
+using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Reflection;
 using System.Text.Json;
+using System.Threading.Tasks;
 
 namespace MHServerEmu.Games.GameData.PatchManager
 {
     public class PrototypePatchManager
     {
         private static readonly Logger Logger = LogManager.CreateLogger();
-        private Stack<PrototypeId> _protoStack = new();
+
+        
         private readonly Dictionary<PrototypeId, List<PrototypePatchEntry>> _patchDict = new();
-        private Dictionary<Prototype, string> _pathDict = new();
+
         private bool _initialized = false;
 
         public static PrototypePatchManager Instance { get; } = new();
 
         public void Initialize(bool enablePatchManager)
         {
-            if (enablePatchManager) _initialized = LoadPatchDataFromDisk();
+            if (enablePatchManager)
+            {
+               
+                _initialized = LoadPatchDataFromDisk();
+
+             
+                if (_patchDict.Count > 0)
+                {
+                    Task.Run(() => ApplyAllPatches());
+                }
+            }
         }
 
         private bool LoadPatchDataFromDisk()
@@ -32,11 +49,9 @@ namespace MHServerEmu.Games.GameData.PatchManager
             int count = 0;
             var options = new JsonSerializerOptions { Converters = { new PatchEntryConverter() } };
 
-            // Use pooled list for file paths to avoid allocation
             List<string> patchFiles = ListPool<string>.Instance.Get();
             try
             {
-                // Read all .json files that start with PatchData
                 foreach (string filePath in FileHelper.GetFilesWithPrefix(patchDirectory, "PatchData", "json"))
                 {
                     patchFiles.Add(filePath);
@@ -56,8 +71,13 @@ namespace MHServerEmu.Games.GameData.PatchManager
                     foreach (PrototypePatchEntry value in updateValues)
                     {
                         if (value.Enabled == false) continue;
+
                         PrototypeId prototypeId = GameDatabase.GetPrototypeRefByName(value.Prototype);
-                        if (prototypeId == PrototypeId.Invalid) continue;
+                        if (prototypeId == PrototypeId.Invalid)
+                        {
+                            Logger.Warn($"Could not find prototype ID for '{value.Prototype}' in patch '{value.Description}'. Skipping.");
+                            continue;
+                        }
                         AddPatchValue(prototypeId, value);
                         count++;
                     }
@@ -70,7 +90,44 @@ namespace MHServerEmu.Games.GameData.PatchManager
                 ListPool<string>.Instance.Return(patchFiles);
             }
 
-            return Logger.InfoReturn(true, $"Loaded {count} patches");
+            return Logger.InfoReturn(true, $"Loaded {count} patches to be applied after initialization.");
+        }
+
+        // This method now applies ALL patches after the database is initialized.
+        private void ApplyAllPatches()
+        {
+            // This is the "smart timer" that waits for the database to be fully loaded.
+            while (!GameDatabase.IsInitialized)
+            {
+                Task.Delay(100).Wait();
+            }
+
+            Logger.Info("GameDatabase is initialized. Applying all patches...");
+            foreach (var kvp in _patchDict)
+            {
+                PrototypeId prototypeId = kvp.Key;
+                var patches = kvp.Value;
+
+                var prototype = GameDatabase.GetPrototype<Prototype>(prototypeId);
+                if (prototype == null)
+                {
+                    Logger.Warn($"Could not find prototype '{prototypeId.GetName()}' to apply patches.");
+                    continue;
+                }
+
+                foreach (var entry in patches)
+                {
+                    try
+                    {
+                        ApplyPatchToTarget(entry, prototype);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.ErrorException(ex, $"Failed to apply patch: [{entry.Prototype}] [{entry.Path}] {ex.Message}");
+                    }
+                }
+            }
+            Logger.Info("Finished applying all patches.");
         }
 
         private void AddPatchValue(PrototypeId prototypeId, in PrototypePatchEntry value)
@@ -83,122 +140,51 @@ namespace MHServerEmu.Games.GameData.PatchManager
             patchList.Add(value);
         }
 
-        public bool CheckProperties(PrototypeId protoRef, out Properties.PropertyCollection prop)
+        
+        public bool PreCheck(PrototypeId protoRef) => false;
+        public void PostOverride(Prototype prototype) { }
+        public void SetPath(Prototype parent, Prototype child, string fieldName) { }
+        public void SetPathIndex(Prototype parent, Prototype child, string fieldName, int index) { }
+
+       
+        public bool CheckProperties(PrototypeId protoRef, out PropertyCollection prop)
         {
             prop = null;
-            if (_initialized == false) return false;
+            if (!_initialized) return false;
 
             if (protoRef != PrototypeId.Invalid && _patchDict.TryGetValue(protoRef, out var list))
+            {
                 foreach (var entry in list)
+                {
                     if (entry.Value.ValueType == ValueType.Properties)
                     {
-                        prop = entry.Value.GetValue() as Properties.PropertyCollection;
+                        prop = entry.Value.GetValue() as PropertyCollection;
                         return prop != null;
                     }
-
+                }
+            }
             return false;
         }
 
-        public bool PreCheck(PrototypeId protoRef)
+        private static bool ApplyPatchToTarget(PrototypePatchEntry entry, Prototype prototype)
         {
-            if (_initialized == false) return false;
-
-            if (protoRef != PrototypeId.Invalid && _patchDict.TryGetValue(protoRef, out var list))
-            {
-                if (NotPatched(list))
-                    _protoStack.Push(protoRef);
-            }
-
-            return _protoStack.Count > 0;
-        }
-
-        private static bool NotPatched(List<PrototypePatchEntry> list)
-        {
-            foreach (var entry in list)
-                if (entry.Patched == false) return true;
-            return false;
-        }
-
-        public void PostOverride(Prototype prototype)
-        {
-            if (_protoStack.Count == 0) return;
-
-            string currentPath = string.Empty;
-            if (prototype.DataRef == PrototypeId.Invalid
-                && _pathDict.TryGetValue(prototype, out currentPath) == false) return;
-
-            PrototypeId patchProtoRef = _protoStack.Peek();
-            if (prototype.DataRef != PrototypeId.Invalid)
-            {
-                if (prototype.DataRef != patchProtoRef) return;
-                if (_patchDict.ContainsKey(prototype.DataRef))
-                    patchProtoRef = _protoStack.Pop();
-            }
-
-            if (_patchDict.TryGetValue(patchProtoRef, out var list) == false) return;
-
-            foreach (var entry in list)
-                if (entry.Patched == false)
-                    CheckAndUpdate(entry, prototype, currentPath);
-
-            if (_protoStack.Count == 0)
-                _pathDict.Clear();
-        }
-
-        private static bool CheckAndUpdate(PrototypePatchEntry entry, Prototype prototype, string currentPath)
-        {
-            try
-            {
-                return ApplyPatchToTarget(entry, prototype, currentPath);
-            }
-            catch (Exception ex)
-            {
-                Logger.WarnException(ex, $"Failed to apply patch: [{entry.Prototype}] [{entry.Path}] {ex.Message}");
-                return false;
-            }
-        }
-
-        private static bool ApplyPatchToTarget(PrototypePatchEntry entry, Prototype prototype, string currentPath)
-        {
-            if (currentPath.StartsWith('.')) currentPath = currentPath[1..];
-
-            // Check if this is the right object for this patch
             if (entry.PathSegments.Count == 0) return false;
 
-            // Use pooled list for building expected path
-            List<string> pathSegments = ListPool<string>.Instance.Get();
-            try
+            bool success = ApplyNestedPatch(entry, prototype);
+
+            if (success)
             {
-                for (int i = 0; i < entry.PathSegments.Count - 1; i++)
-                {
-                    pathSegments.Add(entry.PathSegments[i].FieldName);
-                }
-
-                string expectedPath = string.Join(".", pathSegments);
-                if (expectedPath != currentPath) return false;
-
-                // Apply the patch using the new nested path system
-                bool success = ApplyNestedPatch(entry, prototype);
-
-                if (success)
-                {
-                    Logger.Trace($"Patch Prototype: {entry.Prototype} {entry.Path} = {entry.Value.GetValue()} (Operation: {entry.Operation})");
-                    entry.Patched = true;
-                }
-
-                return success;
+                Logger.Trace($"Patch Prototype: {entry.Prototype} {entry.Path} = {entry.Value.GetValue()} (Operation: {entry.Operation})");
+                entry.Patched = true;
             }
-            finally
-            {
-                ListPool<string>.Instance.Return(pathSegments);
-            }
+
+            return success;
         }
 
         private static bool ApplyNestedPatch(PrototypePatchEntry entry, Prototype prototype)
         {
             object currentObject = prototype;
 
-            // Navigate to the target object/array
             for (int i = 0; i < entry.PathSegments.Count - 1; i++)
             {
                 var segment = entry.PathSegments[i];
@@ -206,7 +192,6 @@ namespace MHServerEmu.Games.GameData.PatchManager
                 if (currentObject == null) return false;
             }
 
-            // Apply the operation to the final segment
             var finalSegment = entry.PathSegments.Last();
             return ApplyOperationToSegment(currentObject, finalSegment, entry);
         }
@@ -219,7 +204,6 @@ namespace MHServerEmu.Games.GameData.PatchManager
             object value = fieldInfo.GetValue(obj);
             if (value == null) return null;
 
-            // Navigate through array dimensions if needed
             foreach (int index in segment.ArrayIndices)
             {
                 if (value is not Array array) return null;
@@ -233,53 +217,41 @@ namespace MHServerEmu.Games.GameData.PatchManager
 
         private static bool ApplyOperationToSegment(object targetObject, PathSegment segment, PrototypePatchEntry entry)
         {
-            var fieldInfo = targetObject.GetType().GetProperty(segment.FieldName);
+            System.Reflection.PropertyInfo fieldInfo = targetObject.GetType().GetProperty(segment.FieldName);
             if (fieldInfo == null) return false;
-
-            Type fieldType = fieldInfo.PropertyType;
-            object currentValue = fieldInfo.GetValue(targetObject);
 
             switch (entry.Operation)
             {
                 case PatchOperation.Set:
                     return HandleSetOperation(targetObject, fieldInfo, segment, entry);
-
                 case PatchOperation.Add:
                     return HandleAddOperation(targetObject, fieldInfo, segment, entry);
-
                 case PatchOperation.Insert:
                     return HandleInsertOperation(targetObject, fieldInfo, segment, entry);
-
                 case PatchOperation.Remove:
                     return HandleRemoveOperation(targetObject, fieldInfo, segment, entry);
-
                 case PatchOperation.Replace:
                     return HandleReplaceOperation(targetObject, fieldInfo, segment, entry);
-
                 default:
                     throw new NotSupportedException($"Operation {entry.Operation} not supported");
             }
         }
 
-        private static bool HandleSetOperation(object targetObject, PropertyInfo fieldInfo, PathSegment segment, PrototypePatchEntry entry)
+        private static bool HandleSetOperation(object targetObject, System.Reflection.PropertyInfo fieldInfo, PathSegment segment, PrototypePatchEntry entry)
         {
-            Type fieldType = fieldInfo.PropertyType;
-
             if (segment.IsArray)
             {
-                // Setting array element at specific indices (including nested arrays)
                 return SetNestedArrayValue(targetObject, fieldInfo, segment.ArrayIndices, entry.Value);
             }
             else
             {
-                // Setting field value directly
-                object convertedValue = ConvertValue(entry.Value.GetValue(), fieldType);
-                fieldInfo.SetValue(targetObject, convertedValue);
+                object valueToSet = ConvertValue(entry.Value.GetValue(), fieldInfo.PropertyType);
+                fieldInfo.SetValue(targetObject, valueToSet);
                 return true;
             }
         }
 
-        private static bool HandleAddOperation(object targetObject, PropertyInfo fieldInfo, PathSegment segment, PrototypePatchEntry entry)
+        private static bool HandleAddOperation(object targetObject, System.Reflection.PropertyInfo fieldInfo, PathSegment segment, PrototypePatchEntry entry)
         {
             if (!fieldInfo.PropertyType.IsArray)
                 throw new InvalidOperationException($"Add operation can only be used on array fields. Field {segment.FieldName} is not an array.");
@@ -287,27 +259,23 @@ namespace MHServerEmu.Games.GameData.PatchManager
             Array currentArray = (Array)fieldInfo.GetValue(targetObject);
             Type elementType = fieldInfo.PropertyType.GetElementType();
 
-            // Calculate new array size
             object valueToAdd = entry.Value.GetValue();
             int elementsToAdd = valueToAdd is Array addArray ? addArray.Length : 1;
             int currentLength = currentArray?.Length ?? 0;
             int newLength = currentLength + elementsToAdd;
 
-            // Create new array
             Array newArray = Array.CreateInstance(elementType, newLength);
 
-            // Copy existing elements
             if (currentArray != null)
                 Array.Copy(currentArray, newArray, currentLength);
 
-            // Add new elements
             AddElementsToArray(newArray, elementType, valueToAdd, currentLength);
 
             fieldInfo.SetValue(targetObject, newArray);
             return true;
         }
 
-        private static bool HandleInsertOperation(object targetObject, PropertyInfo fieldInfo, PathSegment segment, PrototypePatchEntry entry)
+        private static bool HandleInsertOperation(object targetObject, System.Reflection.PropertyInfo fieldInfo, PathSegment segment, PrototypePatchEntry entry)
         {
             if (!fieldInfo.PropertyType.IsArray)
                 throw new InvalidOperationException($"Insert operation can only be used on array fields. Field {segment.FieldName} is not an array.");
@@ -322,34 +290,29 @@ namespace MHServerEmu.Games.GameData.PatchManager
             if (insertIndex < 0 || insertIndex > (currentArray?.Length ?? 0))
                 throw new IndexOutOfRangeException($"Insert index {insertIndex} is out of range.");
 
-            // Calculate new array size
             object valueToInsert = entry.Value.GetValue();
             int elementsToInsert = valueToInsert is Array insertArray ? insertArray.Length : 1;
             int currentLength = currentArray?.Length ?? 0;
             int newLength = currentLength + elementsToInsert;
 
-            // Create new array and copy elements
             Array newArray = Array.CreateInstance(elementType, newLength);
 
             if (currentArray != null)
             {
-                // Copy elements before insertion point
                 if (insertIndex > 0)
                     Array.Copy(currentArray, 0, newArray, 0, insertIndex);
 
-                // Copy elements after insertion point
                 if (insertIndex < currentLength)
                     Array.Copy(currentArray, insertIndex, newArray, insertIndex + elementsToInsert, currentLength - insertIndex);
             }
 
-            // Insert new elements
             AddElementsToArray(newArray, elementType, valueToInsert, insertIndex);
 
             fieldInfo.SetValue(targetObject, newArray);
             return true;
         }
 
-        private static bool HandleRemoveOperation(object targetObject, PropertyInfo fieldInfo, PathSegment segment, PrototypePatchEntry entry)
+        private static bool HandleRemoveOperation(object targetObject, System.Reflection.PropertyInfo fieldInfo, PathSegment segment, PrototypePatchEntry entry)
         {
             if (!fieldInfo.PropertyType.IsArray)
                 throw new InvalidOperationException($"Remove operation can only be used on array fields. Field {segment.FieldName} is not an array.");
@@ -361,7 +324,6 @@ namespace MHServerEmu.Games.GameData.PatchManager
 
             if (segment.IsArray && segment.ArrayIndices.Count == 1)
             {
-                // Remove by index
                 int removeIndex = segment.ArrayIndices[0];
                 if (removeIndex < 0 || removeIndex >= currentArray.Length)
                     throw new IndexOutOfRangeException($"Remove index {removeIndex} is out of range.");
@@ -381,7 +343,6 @@ namespace MHServerEmu.Games.GameData.PatchManager
             }
             else
             {
-                // Remove by value - use pooled list instead of creating new List<object>
                 List<object> tempList = ListPool<object>.Instance.Get();
                 try
                 {
@@ -409,7 +370,7 @@ namespace MHServerEmu.Games.GameData.PatchManager
             return true;
         }
 
-        private static bool HandleReplaceOperation(object targetObject, PropertyInfo fieldInfo, PathSegment segment, PrototypePatchEntry entry)
+        private static bool HandleReplaceOperation(object targetObject, System.Reflection.PropertyInfo fieldInfo, PathSegment segment, PrototypePatchEntry entry)
         {
             if (!segment.IsArray)
                 throw new InvalidOperationException("Replace operation requires array indices to specify what to replace.");
@@ -417,12 +378,11 @@ namespace MHServerEmu.Games.GameData.PatchManager
             return SetNestedArrayValue(targetObject, fieldInfo, segment.ArrayIndices, entry.Value);
         }
 
-        private static bool SetNestedArrayValue(object targetObject, PropertyInfo fieldInfo, List<int> indices, ValueBase value)
+        private static bool SetNestedArrayValue(object targetObject, System.Reflection.PropertyInfo fieldInfo, List<int> indices, ValueBase value)
         {
             Array array = (Array)fieldInfo.GetValue(targetObject);
             if (array == null) return false;
 
-            // Navigate to the target array element through nested dimensions
             object currentElement = array;
 
             for (int i = 0; i < indices.Count - 1; i++)
@@ -434,15 +394,16 @@ namespace MHServerEmu.Games.GameData.PatchManager
                 if (currentElement == null) return false;
             }
 
-            // Set the final value
             if (currentElement is Array finalArray)
             {
                 int finalIndex = indices.Last();
                 if (finalIndex < 0 || finalIndex >= finalArray.Length) return false;
 
                 Type elementType = finalArray.GetType().GetElementType();
-                object convertedValue = ConvertValue(value.GetValue(), elementType);
-                finalArray.SetValue(convertedValue, finalIndex);
+
+               
+                object elementValue = GetElementValue(value.GetValue(), elementType);
+                finalArray.SetValue(elementValue, finalIndex);
                 return true;
             }
 
@@ -468,14 +429,87 @@ namespace MHServerEmu.Games.GameData.PatchManager
 
         public static object ConvertValue(object rawValue, Type targetType)
         {
-            if (targetType.IsInstanceOfType(rawValue))
+            if (rawValue == null || targetType.IsInstanceOfType(rawValue))
                 return rawValue;
 
-            TypeConverter converter = TypeDescriptor.GetConverter(targetType);
-            if (converter != null && converter.CanConvertFrom(rawValue.GetType()))
-                return converter.ConvertFrom(rawValue);
+            if (rawValue is string stringValue)
+            {
+                if (targetType == typeof(PrototypeId))
+                {
+                    var resolvedId = GameDatabase.GetPrototypeRefByName(stringValue);
+                    if (resolvedId != PrototypeId.Invalid)
+                    {
+                        Logger.Trace($"Successfully resolved prototype name '{stringValue}' to PrototypeId: {resolvedId}");
+                        return resolvedId;
+                    }
+                    Logger.Warn($"Could not resolve prototype name '{stringValue}' to a PrototypeId.");
+                }
 
-            return Convert.ChangeType(rawValue, targetType);
+                if (targetType == typeof(AssetId))
+                {
+                    Logger.Trace($"Attempting to resolve asset name '{stringValue}' to AssetId");
+                    var searchFlags = new[] { DataFileSearchFlags.None, DataFileSearchFlags.CaseInsensitive };
+                    foreach (var flags in searchFlags)
+                    {
+                        foreach (var assetType in AssetDirectory.Instance.IterateAssetTypes())
+                        {
+                            var assetId = assetType.FindAssetByName(stringValue, flags);
+                            if (assetId != AssetId.Invalid)
+                            {
+                                Logger.Trace($"Successfully resolved asset name '{stringValue}' to AssetId: {assetId} in AssetType: {assetType}");
+                                return assetId;
+                            }
+                        }
+                    }
+                    Logger.Warn($"Could not find an asset with the name '{stringValue}' in any loaded AssetType. Available asset types: {string.Join(", ", AssetDirectory.Instance.IterateAssetTypes().Select(at => at.ToString()))}");
+                }
+            }
+
+            if (rawValue is Array sourceArray && targetType.IsArray)
+            {
+                var targetElementType = targetType.GetElementType();
+                var newArray = Array.CreateInstance(targetElementType, sourceArray.Length);
+                try
+                {
+                    for (int i = 0; i < sourceArray.Length; i++)
+                    {
+                        newArray.SetValue(sourceArray.GetValue(i), i);
+                    }
+                    Logger.Trace($"Successfully converted array from {sourceArray.GetType().Name} to {newArray.GetType().Name} via element-wise copy.");
+                    return newArray;
+                }
+                catch (InvalidCastException)
+                {
+                    Logger.Warn($"Failed to convert array from {sourceArray.GetType().Name} to {newArray.GetType().Name} due to an invalid element cast.");
+                }
+            }
+
+            try
+            {
+                TypeConverter converter = TypeDescriptor.GetConverter(targetType);
+                if (converter != null && converter.CanConvertFrom(rawValue.GetType()))
+                {
+                    var convertedValue = converter.ConvertFrom(rawValue);
+                    Logger.Trace($"Successfully converted '{rawValue}' to {targetType.Name} using TypeConverter");
+                    return convertedValue;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"TypeConverter failed to convert '{rawValue}' to {targetType.Name}: {ex.Message}");
+            }
+
+            try
+            {
+                var convertedValue = Convert.ChangeType(rawValue, targetType);
+                Logger.Trace($"Successfully converted '{rawValue}' to {targetType.Name} using Convert.ChangeType");
+                return convertedValue;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"Failed to convert '{rawValue}' to {targetType.Name}: {ex.Message}");
+                throw;
+            }
         }
 
         private static object GetElementValue(object valueEntry, Type elementType)
@@ -486,24 +520,16 @@ namespace MHServerEmu.Games.GameData.PatchManager
                     ?? throw new InvalidOperationException($"DataRef {dataRef} is not Prototype.");
                 valueEntry = prototype;
             }
+            else if (valueEntry is Prototype proto)
+            {
+                if (!elementType.IsInstanceOfType(proto))
+                {
+                    return ConvertValue(proto, elementType);
+                }
+                return proto;
+            }
 
             return ConvertValue(valueEntry, elementType);
-        }
-
-        public void SetPath(Prototype parent, Prototype child, string fieldName)
-        {
-            string parentPath = _pathDict.TryGetValue(parent, out var path) ? path : string.Empty;
-            if (parent.DataRef != PrototypeId.Invalid && _patchDict.ContainsKey(parent.DataRef)) 
-                parentPath = string.Empty;
-            _pathDict[child] = $"{parentPath}.{fieldName}";
-        }
-
-        public void SetPathIndex(Prototype parent, Prototype child, string fieldName, int index)
-        {
-            string parentPath = _pathDict.TryGetValue(parent, out var path) ? path : string.Empty;
-            if (parent.DataRef != PrototypeId.Invalid && _patchDict.ContainsKey(parent.DataRef)) 
-                parentPath = string.Empty;
-            _pathDict[child] = $"{parentPath}.{fieldName}[{index}]";
         }
     }
 }
