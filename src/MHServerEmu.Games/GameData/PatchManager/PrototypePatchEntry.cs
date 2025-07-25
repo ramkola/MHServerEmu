@@ -3,9 +3,10 @@ using MHServerEmu.Core.VectorMath;
 using MHServerEmu.Games.GameData.Calligraphy;
 using MHServerEmu.Games.GameData.Prototypes;
 using MHServerEmu.Games.Properties;
+using System;
+using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using System.Text.RegularExpressions;
 
 namespace MHServerEmu.Games.GameData.PatchManager
 {
@@ -16,74 +17,62 @@ namespace MHServerEmu.Games.GameData.PatchManager
         public string Path { get; }
         public string Description { get; }
         public ValueBase Value { get; }
-        public PatchOperation Operation { get; }
 
         [JsonIgnore]
-        public List<PathSegment> PathSegments { get; }
+        public string СlearPath { get; }
+        [JsonIgnore]
+        public string FieldName { get; }
+        [JsonIgnore]
+        public bool ArrayValue { get; }
+        [JsonIgnore]
+        public int ArrayIndex { get; }
         [JsonIgnore]
         public bool Patched { get; set; }
 
         [JsonConstructor]
-        public PrototypePatchEntry(bool enabled, string prototype, string path, string description, ValueBase value, PatchOperation operation = PatchOperation.Set)
+        public PrototypePatchEntry(bool enabled, string prototype, string path, string description, ValueBase value)
         {
             Enabled = enabled;
             Prototype = prototype;
             Path = path;
             Description = description;
             Value = value;
-            Operation = operation;
-            PathSegments = ParsePath(path);
-            Patched = false;
-        }
 
-        private static List<PathSegment> ParsePath(string path)
-        {
-            var segments = new List<PathSegment>();
-            var regex = new Regex(@"([a-zA-Z_][a-zA-Z0-9_]*)(\[(\d+)\])*");
-            var matches = regex.Matches(path);
-
-            foreach (Match match in matches)
+            int lastDotIndex = path.LastIndexOf('.');
+            if (lastDotIndex == -1)
             {
-                string fieldName = match.Groups[1].Value;
-                var indices = new List<int>();
-
-                var indexCaptures = match.Groups[3].Captures;
-                foreach (Capture capture in indexCaptures)
-                {
-                    if (int.TryParse(capture.Value, out int index))
-                        indices.Add(index);
-                }
-
-                segments.Add(new PathSegment(fieldName, indices));
+                СlearPath = string.Empty;
+                FieldName = path;
+            }
+            else
+            {
+                СlearPath = path[..lastDotIndex];
+                FieldName = path[(lastDotIndex + 1)..];
             }
 
-            return segments;
+            ArrayIndex = -1;
+            ArrayValue = false;
+            int index = FieldName.LastIndexOf('[');
+            if (index != -1)
+            {
+                ArrayValue = true;
+
+                int endIndex = FieldName.LastIndexOf(']');
+                if (endIndex > index)
+                {
+                    string indexStr = FieldName.Substring(index + 1, endIndex - index - 1);
+                    if (int.TryParse(indexStr, out int parsedIndex))
+                        ArrayIndex = parsedIndex;
+                }
+
+                FieldName = FieldName[..index];
+            }
+
+            Patched = false;
         }
     }
 
-    public class PathSegment
-    {
-        public string FieldName { get; }
-        public List<int> ArrayIndices { get; }
-        public bool IsArray => ArrayIndices.Count > 0;
-        public bool IsNestedArray => ArrayIndices.Count > 1;
-
-        public PathSegment(string fieldName, List<int> arrayIndices)
-        {
-            FieldName = fieldName;
-            ArrayIndices = arrayIndices ?? new List<int>();
-        }
-    }
-
-    public enum PatchOperation
-    {
-        Set,
-        Add,
-        Insert,
-        Remove,
-        Replace
-    }
-
+ 
     public class PatchEntryConverter : JsonConverter<PrototypePatchEntry>
     {
         private static readonly Logger Logger = LogManager.CreateLogger();
@@ -92,171 +81,97 @@ namespace MHServerEmu.Games.GameData.PatchManager
         {
             using JsonDocument doc = JsonDocument.ParseValue(ref reader);
             var root = doc.RootElement;
+            string valueTypeString = root.GetProperty("ValueType").GetString();
 
-            if (!root.TryGetProperty("ValueType", out var valueTypeElement))
-                throw new JsonException("Missing required property 'ValueType'");
+            // Allow "Type[]" syntax in JSON for array types
+            valueTypeString = valueTypeString.Replace("[]", "Array");
 
-            if (!root.TryGetProperty("Value", out var valueElement))
-                throw new JsonException("Missing required property 'Value'");
+            var valueType = Enum.Parse<ValueType>(valueTypeString, true);
+            var entry = new PrototypePatchEntry
+            (
+                root.GetProperty("Enabled").GetBoolean(),
+                root.GetProperty("Prototype").GetString(),
+                root.GetProperty("Path").GetString(),
+                root.GetProperty("Description").GetString(),
+                GetValueBase(root.GetProperty("Value"), valueType)
+            );
 
-            string valueTypeString = valueTypeElement.GetString();
-
-            if (!valueTypeString.EndsWith("Array") && valueTypeString.Contains("[]"))
+            if (valueType == ValueType.Properties)
             {
-                valueTypeString = valueTypeString.Replace("[]", "Array");
+                entry.Patched = true;
             }
 
-            if (!Enum.TryParse<ValueType>(valueTypeString, out var valueType))
-                throw new JsonException($"Invalid ValueType: {valueTypeString}");
+            return entry;
+        }
 
-            var operation = PatchOperation.Set;
-            if (root.TryGetProperty("Operation", out var operationElement))
-            {
-                if (!Enum.TryParse<PatchOperation>(operationElement.GetString(), out operation))
-                    operation = PatchOperation.Set;
-            }
-
-            try
-            {
-                var entry = new PrototypePatchEntry
-                (
-                    root.GetProperty("Enabled").GetBoolean(),
-                    root.GetProperty("Prototype").GetString(),
-                    root.GetProperty("Path").GetString(),
-                    root.GetProperty("Description").GetString(),
-                    GetValueBase(valueElement, valueType),
-                    operation
-                );
-
-                if (valueType == ValueType.Properties) entry.Patched = true;
-
-                return entry;
-            }
-            catch (Exception ex)
-            {
-                throw new JsonException($"Failed to deserialize PrototypePatchEntry: {ex.Message}", ex);
-            }
+        public override void Write(Utf8JsonWriter writer, PrototypePatchEntry value, JsonSerializerOptions options)
+        {
+            writer.WriteStartObject();
+            writer.WriteBoolean("Enabled", value.Enabled);
+            writer.WriteString("Prototype", value.Prototype);
+            writer.WriteString("Path", value.Path);
+            writer.WriteString("Description", value.Description);
+            writer.WriteString("ValueType", value.Value.ValueType.ToString());
+            writer.WritePropertyName("Value");
+            JsonSerializer.Serialize(writer, value.Value.GetValue(), options);
+            writer.WriteEndObject();
         }
 
         public static ValueBase GetValueBase(JsonElement jsonElement, ValueType valueType)
         {
-            switch (valueType)
+            return valueType switch
             {
-                case ValueType.String: return new SimpleValue<string>(jsonElement.GetString(), valueType);
-                case ValueType.Boolean: return new SimpleValue<bool>(jsonElement.GetBoolean(), valueType);
-                case ValueType.Float: return new SimpleValue<float>(jsonElement.GetSingle(), valueType);
-                case ValueType.Integer: return new SimpleValue<int>(jsonElement.GetInt32(), valueType);
-                case ValueType.Enum: return new SimpleValue<string>(jsonElement.GetString(), valueType);
-                case ValueType.PrototypeGuid: return new SimpleValue<PrototypeGuid>((PrototypeGuid)jsonElement.GetUInt64(), valueType);
-                case ValueType.PrototypeId:
-                case ValueType.PrototypeDataRef: return new SimpleValue<PrototypeId>((PrototypeId)jsonElement.GetUInt64(), valueType);
-                case ValueType.LocaleStringId: return new SimpleValue<LocaleStringId>((LocaleStringId)jsonElement.GetUInt64(), valueType);
-                case ValueType.AssetId: return new SimpleValue<string>(jsonElement.GetString(), valueType);
-                case ValueType.Vector3: return new SimpleValue<Vector3>(ParseJsonVector3(jsonElement), valueType);
+                // Simple value types
+                ValueType.String => new SimpleValue<string>(jsonElement.GetString(), valueType),
+                ValueType.Boolean => new SimpleValue<bool>(jsonElement.GetBoolean(), valueType),
+                ValueType.Float => new SimpleValue<float>(jsonElement.GetSingle(), valueType),
+                ValueType.Integer => new SimpleValue<int>(jsonElement.GetInt32(), valueType),
+                ValueType.Enum => new SimpleValue<string>(jsonElement.GetString(), valueType),
+                ValueType.PrototypeGuid => new SimpleValue<PrototypeGuid>((PrototypeGuid)jsonElement.GetUInt64(), valueType),
+                ValueType.PrototypeId or ValueType.PrototypeDataRef => new SimpleValue<PrototypeId>((PrototypeId)jsonElement.GetUInt64(), valueType),
+                ValueType.LocaleStringId => new SimpleValue<LocaleStringId>((LocaleStringId)jsonElement.GetUInt64(), valueType),
+                ValueType.Vector3 => new SimpleValue<Vector3>(ParseJsonVector3(jsonElement), valueType),
 
-                case ValueType.Prototype:
-                case ValueType.Properties:
-                case ValueType.PrototypeArray:
-                case ValueType.PrototypeIdArray:
-                case ValueType.PrototypeDataRefArray:
-                    return new JsonValue(jsonElement.Clone(), valueType);
+                // Complex types stored as JsonElement for deferred parsing
+                ValueType.Prototype => new SimpleValue<JsonElement>(jsonElement.Clone(), valueType),
+                ValueType.Properties => new SimpleValue<PropertyCollection>(ParseJsonProperties(jsonElement), valueType),
+                ValueType.ComplexObject => new SimpleValue<JsonElement>(jsonElement.Clone(), valueType),
 
-                default:
-                    throw new NotSupportedException($"Type {valueType} not support.");
-            }
+                // Array types
+                ValueType.PrototypeIdArray or ValueType.PrototypeDataRefArray => new ArrayValue<PrototypeId>(jsonElement, valueType, x => (PrototypeId)x.GetUInt64()),
+                ValueType.PrototypeArray => new ArrayValue<JsonElement>(jsonElement, valueType, x => x.Clone()),
+                ValueType.StringArray => new ArrayValue<string>(jsonElement, valueType, x => x.GetString()),
+                ValueType.FloatArray => new ArrayValue<float>(jsonElement, valueType, x => x.GetSingle()),
+                ValueType.IntegerArray => new ArrayValue<int>(jsonElement, valueType, x => x.GetInt32()),
+                ValueType.BooleanArray => new ArrayValue<bool>(jsonElement, valueType, x => x.GetBoolean()),
+                ValueType.Vector3Array => new ArrayValue<Vector3>(jsonElement, valueType, x => ParseJsonVector3(x)),
+
+                _ => throw new NotSupportedException($"ValueType '{valueType}' is not supported.")
+            };
         }
 
         private static Vector3 ParseJsonVector3(JsonElement jsonElement)
         {
             if (jsonElement.ValueKind != JsonValueKind.Array)
-                throw new InvalidOperationException("Json element is not array");
+                throw new InvalidOperationException("JSON element for Vector3 must be an array.");
 
             var jsonArray = jsonElement.EnumerateArray().ToArray();
             if (jsonArray.Length != 3)
-                throw new InvalidOperationException("Json element is not Vector3");
+                throw new InvalidOperationException($"JSON array for Vector3 must have 3 elements, but found {jsonArray.Length}.");
 
             return new Vector3(jsonArray[0].GetSingle(), jsonArray[1].GetSingle(), jsonArray[2].GetSingle());
         }
 
-        public static object ParseJsonElement(JsonElement value, Type targetType)
-        {
-            if (typeof(Prototype).IsAssignableFrom(targetType) && !targetType.IsArray)
-            {
-                return ParseJsonPrototype(value);
-            }
-            if (targetType.IsArray)
-            {
-                var elementType = targetType.GetElementType();
-                var jsonArray = value.EnumerateArray().ToArray();
-                var newArray = Array.CreateInstance(elementType, jsonArray.Length);
-
-                for (int i = 0; i < jsonArray.Length; i++)
-                {
-                    var elementValue = ParseJsonElement(jsonArray[i], elementType);
-                    newArray.SetValue(elementValue, i);
-                }
-                return newArray;
-            }
-            if (targetType == typeof(PropertyCollection))
-            {
-                return ParseJsonProperties(value);
-            }
-
-            if (targetType == typeof(PrototypeId))
-            {
-                if (value.ValueKind == JsonValueKind.Number && value.TryGetUInt64(out ulong ulongValue))
-                    return (PrototypeId)ulongValue;
-            }
-
-            if (targetType == typeof(AssetId))
-            {
-                if (value.ValueKind == JsonValueKind.Number && value.TryGetUInt64(out ulong ulongValue))
-                    return (AssetId)ulongValue;
-            }
-
-            if (targetType == typeof(PrototypeGuid))
-            {
-                if (value.ValueKind == JsonValueKind.Number && value.TryGetUInt64(out ulong ulongValue))
-                    return (PrototypeGuid)ulongValue;
-            }
-
-            if (targetType == typeof(LocaleStringId))
-            {
-                if (value.ValueKind == JsonValueKind.Number && value.TryGetUInt64(out ulong ulongValue))
-                    return (LocaleStringId)ulongValue;
-            }
-
-            switch (value.ValueKind)
-            {
-                case JsonValueKind.String:
-                    return value.GetString();
-                case JsonValueKind.Number:
-                    if (value.TryGetUInt64(out ulong ulongValue))
-                        return ulongValue;
-                    else if (value.TryGetInt64(out long decimalValue))
-                        return decimalValue;
-                    else if (value.TryGetDouble(out double doubleValue))
-                        return doubleValue;
-                    else
-                        return value.GetRawText();
-                case JsonValueKind.True:
-                case JsonValueKind.False:
-                    return value.GetBoolean();
-                default:
-                    return value.ToString();
-            }
-        }
-
         public static Prototype ParseJsonPrototype(JsonElement jsonElement)
         {
-            var referenceType = (PrototypeId)jsonElement.GetProperty("ParentDataRef").GetUInt64();
-            Type classType = GameDatabase.DataDirectory.GetPrototypeClassType(referenceType);
-            if (classType == null)
-            {
-                Logger.Error($"ParseJsonPrototype: Could not find class type for ParentDataRef {referenceType.GetName()}");
-                return null;
-            }
+            if (jsonElement.ValueKind != JsonValueKind.Object)
+                throw new InvalidOperationException("JSON element for Prototype parsing must be an object.");
 
+            if (!jsonElement.TryGetProperty("ParentDataRef", out var parentDataRefElement))
+                throw new InvalidOperationException("JSON element for Prototype is missing the required 'ParentDataRef' property.");
+
+            var referenceType = (PrototypeId)parentDataRefElement.GetUInt64();
+            Type classType = GameDatabase.DataDirectory.GetPrototypeClassType(referenceType);
             var prototype = GameDatabase.PrototypeClassManager.AllocatePrototype(classType);
 
             CalligraphySerializer.CopyPrototypeDataRefFields(prototype, referenceType);
@@ -269,22 +184,19 @@ namespace MHServerEmu.Games.GameData.PatchManager
                 var fieldInfo = prototype.GetType().GetProperty(property.Name);
                 if (fieldInfo == null)
                 {
-                    if (property.Name != "PolymorphicData")
-                    {
-                        Logger.Warn($"ParseJsonPrototype: Field '{property.Name}' not found on prototype of type '{classType.Name}'.");
-                    }
+                    Logger.Warn($"Property '{property.Name}' not found on prototype type '{prototype.GetType().Name}'. Skipping.");
                     continue;
                 }
 
                 try
                 {
-                    object valueToSet = ParseJsonElement(property.Value, fieldInfo.PropertyType);
-                    object convertedValue = PrototypePatchManager.ConvertValue(valueToSet, fieldInfo.PropertyType);
+                    object element = ParseJsonElement(property.Value, fieldInfo.PropertyType);
+                    object convertedValue = PrototypePatchManager.ConvertValue(element, fieldInfo.PropertyType);
                     fieldInfo.SetValue(prototype, convertedValue);
                 }
                 catch (Exception ex)
                 {
-                    Logger.ErrorException(ex, $"ParseJsonPrototype: Failed to set field '{property.Name}' on prototype.");
+                    Logger.ErrorException(ex, $"Failed to parse or convert property '{property.Name}' for prototype '{prototype.GetType().Name}'.");
                 }
             }
 
@@ -298,17 +210,24 @@ namespace MHServerEmu.Games.GameData.PatchManager
 
             foreach (var property in jsonElement.EnumerateObject())
             {
-                var propEnum = (PropertyEnum)Enum.Parse(typeof(PropertyEnum), property.Name);
-                MHServerEmu.Games.Properties.PropertyInfo propertyInfo = infoTable.LookupPropertyInfo(propEnum);
-                PropertyId propId = ParseJsonPropertyId(property.Value, propEnum, propertyInfo);
-                PropertyValue propValue = ParseJsonPropertyValue(property.Value, propertyInfo);
-                properties.SetProperty(propValue, propId);
+                try
+                {
+                    var propEnum = (PropertyEnum)Enum.Parse(typeof(PropertyEnum), property.Name);
+                    PropertyInfo propertyInfo = infoTable.LookupPropertyInfo(propEnum);
+                    PropertyId propId = ParseJsonPropertyId(property.Value, propEnum, propertyInfo);
+                    PropertyValue propValue = ParseJsonPropertyValue(property.Value, propertyInfo);
+                    properties.SetProperty(propValue, propId);
+                }
+                catch (Exception ex)
+                {
+                    Logger.WarnException(ex, $"Failed to parse property '{property.Name}': {ex.Message}");
+                }
             }
 
             return properties;
         }
 
-        public static PropertyId ParseJsonPropertyId(JsonElement jsonElement, PropertyEnum propEnum, MHServerEmu.Games.Properties.PropertyInfo propInfo)
+        public static PropertyId ParseJsonPropertyId(JsonElement jsonElement, PropertyEnum propEnum, PropertyInfo propInfo)
         {
             int paramCount = propInfo.ParamCount;
             if (paramCount == 0) return new(propEnum);
@@ -317,100 +236,118 @@ namespace MHServerEmu.Games.GameData.PatchManager
             Span<PropertyParam> paramValues = stackalloc PropertyParam[Property.MaxParamCount];
             propInfo.DefaultParamValues.CopyTo(paramValues);
 
-            for (int i = 0; i < paramCount; i++)
+            for (int i = 0; i < paramCount && i < Property.MaxParamCount; i++)
             {
-                if (i >= 4) break;
                 if (i >= jsonArray.Length) continue;
-
                 var paramValue = jsonArray[i];
 
                 switch (propInfo.GetParamType(i))
                 {
                     case PropertyParamType.Asset:
-                        var assetParam = (AssetId)ParseJsonElement(paramValue, typeof(AssetId));
-                        paramValues[i] = Property.ToParam(assetParam);
+                        paramValues[i] = Property.ToParam((AssetId)ParseJsonElement(paramValue, typeof(AssetId)));
                         break;
-
                     case PropertyParamType.Prototype:
-                        var protoRefParam = (PrototypeId)ParseJsonElement(paramValue, typeof(PrototypeId));
-                        paramValues[i] = Property.ToParam(propEnum, i, protoRefParam);
+                        paramValues[i] = Property.ToParam(propEnum, i, (PrototypeId)ParseJsonElement(paramValue, typeof(PrototypeId)));
                         break;
-
                     case PropertyParamType.Integer:
-                        if (paramValue.TryGetInt64(out long decimalValue))
-                            paramValues[i] = (PropertyParam)(int)decimalValue;
+                        if (paramValue.TryGetInt32(out int intValue))
+                            paramValues[i] = (PropertyParam)intValue;
                         break;
-
                     default:
-                        throw new InvalidOperationException("Encountered an unknown prop param type in an ParseJsonPropertyId!");
+                        Logger.Warn($"Unsupported PropertyParamType: {propInfo.GetParamType(i)} for property {propEnum}");
+                        break;
                 }
             }
 
-            return new(propEnum, paramValues);
+            return new PropertyId(propEnum, paramValues[0], paramValues[1], paramValues[2], paramValues[3]);
         }
 
-        public static PropertyValue ParseJsonPropertyValue(JsonElement jsonElement, MHServerEmu.Games.Properties.PropertyInfo propInfo)
+        public static PropertyValue ParseJsonPropertyValue(JsonElement jsonElement, PropertyInfo propInfo)
         {
-            if (propInfo.ParamCount > 0)
+            if (propInfo.ParamCount > 0 && jsonElement.ValueKind == JsonValueKind.Array)
             {
                 var jsonArray = jsonElement.EnumerateArray().ToArray();
-                jsonElement = jsonArray[^1];
+                if (jsonArray.Length > 0)
+                {
+                    jsonElement = jsonArray[^1];
+                }
             }
 
-            switch (propInfo.DataType)
+            return propInfo.DataType switch
             {
-                case PropertyDataType.Integer:
-                    if (jsonElement.TryGetInt64(out long decimalValue))
-                        return (PropertyValue)decimalValue;
-                    break;
-
-                case PropertyDataType.Real:
-                    if (jsonElement.TryGetDouble(out double doubleValue))
-                        return (PropertyValue)(float)doubleValue;
-                    break;
-
-                case PropertyDataType.Boolean:
-                    return (PropertyValue)jsonElement.GetBoolean();
-
-                case PropertyDataType.Prototype:
-                    var protoRefValue = (PrototypeId)ParseJsonElement(jsonElement, typeof(PrototypeId));
-                    return (PropertyValue)protoRefValue;
-
-                case PropertyDataType.Asset:
-                    AssetId assetValue = (AssetId)ParseJsonElement(jsonElement, typeof(AssetId));
-                    return (PropertyValue)assetValue;
-
-                default:
-                    throw new InvalidOperationException($"[ParseJsonPropertyValue] Assignment into invalid property (property type is not int/float/bool)! Property: {propInfo.PropertyName}");
-            }
-
-            return propInfo.DefaultValue;
+                PropertyDataType.Integer => new PropertyValue(jsonElement.GetInt64()),
+                PropertyDataType.Real => new PropertyValue(jsonElement.GetSingle()),
+                PropertyDataType.Boolean => new PropertyValue(jsonElement.GetBoolean()),
+                PropertyDataType.Prototype => new PropertyValue((PrototypeId)ParseJsonElement(jsonElement, typeof(PrototypeId))),
+                PropertyDataType.Asset => new PropertyValue((AssetId)ParseJsonElement(jsonElement, typeof(AssetId))),
+                _ => throw new InvalidOperationException($"Unsupported PropertyDataType '{propInfo.DataType}' for property '{propInfo.PropertyName}'.")
+            };
         }
 
-        public override void Write(Utf8JsonWriter writer, PrototypePatchEntry value, JsonSerializerOptions options)
+        public static object ParseJsonElement(JsonElement value, Type targetType)
         {
-            throw new NotImplementedException();
+            if (value.ValueKind == JsonValueKind.Null || value.ValueKind == JsonValueKind.Undefined)
+                return null;
+
+            if (targetType == typeof(string)) return value.GetString();
+            if (targetType == typeof(bool) || targetType == typeof(bool?)) return value.GetBoolean();
+            if (targetType == typeof(int) || targetType == typeof(int?)) return value.GetInt32();
+            if (targetType == typeof(long) || targetType == typeof(long?)) return value.GetInt64();
+            if (targetType == typeof(float) || targetType == typeof(float?)) return value.GetSingle();
+            if (targetType == typeof(double) || targetType == typeof(double?)) return value.GetDouble();
+            if (targetType == typeof(ulong) || targetType == typeof(ulong?)) return value.GetUInt64();
+            if (targetType == typeof(PrototypeId)) return (PrototypeId)value.GetUInt64();
+            if (targetType == typeof(AssetId)) return (AssetId)value.GetUInt64();
+            if (targetType == typeof(LocaleStringId)) return (LocaleStringId)value.GetUInt64();
+            if (targetType == typeof(PrototypeGuid)) return (PrototypeGuid)value.GetUInt64();
+            if (targetType.IsEnum)
+            {
+                if (value.ValueKind == JsonValueKind.String)
+                    return Enum.Parse(targetType, value.GetString(), true);
+                if (value.ValueKind == JsonValueKind.Number)
+                    return Enum.ToObject(targetType, value.GetInt32());
+            }
+
+            // For complex objects, prototypes, or arrays, return the JsonElement itself
+            // to be fully parsed later by a more specific method.
+            if (value.ValueKind == JsonValueKind.Object || value.ValueKind == JsonValueKind.Array)
+            {
+                return value;
+            }
+
+            // Fallback for any other scenario
+            return value.ToString();
         }
     }
 
     public enum ValueType
     {
+        // Simple Types
         String,
         Boolean,
         Float,
         Integer,
         Enum,
-        AssetId,
         PrototypeGuid,
         PrototypeId,
-        PrototypeIdArray,
         LocaleStringId,
         PrototypeDataRef,
-        PrototypeDataRefArray,
-        Prototype,
-        PrototypeArray,
         Vector3,
-        Properties
+
+        // Complex Types
+        Prototype,
+        Properties,
+        ComplexObject,
+
+        // Array Types
+        StringArray,
+        BooleanArray,
+        FloatArray,
+        IntegerArray,
+        PrototypeIdArray,
+        PrototypeDataRefArray,
+        PrototypeArray,
+        Vector3Array,
     }
 
     public abstract class ValueBase
@@ -433,34 +370,26 @@ namespace MHServerEmu.Games.GameData.PatchManager
         public override object GetValue() => Value;
     }
 
-    public class JsonValue : ValueBase
+    public class ArrayValue<T> : SimpleValue<T[]>
     {
-        public override ValueType ValueType { get; }
-        public JsonElement Value { get; }
-        private object _parsedValue;
+        public ArrayValue(JsonElement jsonElement, ValueType valueType, Func<JsonElement, T> elementParser)
+            : base(ParseJsonArray(jsonElement, elementParser), valueType) { }
 
-        public JsonValue(JsonElement value, ValueType valueType)
+        private static T[] ParseJsonArray(JsonElement jsonElement, Func<JsonElement, T> elementParser)
         {
-            Value = value;
-            ValueType = valueType;
-        }
+            if (jsonElement.ValueKind != JsonValueKind.Array)
+                throw new InvalidOperationException("JSON element is not an array and cannot be parsed as an ArrayValue.");
 
-        public override object GetValue()
-        {
-            if (_parsedValue == null)
+            var jsonArray = jsonElement.EnumerateArray().ToArray();
+            if (jsonArray.Length == 0) return Array.Empty<T>();
+
+            var result = new T[jsonArray.Length];
+            for (int i = 0; i < jsonArray.Length; i++)
             {
-                Type targetType = ValueType switch
-                {
-                    ValueType.Prototype => typeof(Prototype),
-                    ValueType.Properties => typeof(PropertyCollection),
-                    ValueType.PrototypeArray => typeof(Prototype[]),
-                    ValueType.PrototypeIdArray => typeof(PrototypeId[]),
-                    ValueType.PrototypeDataRefArray => typeof(PrototypeId[]),
-                    _ => typeof(object)
-                };
-                _parsedValue = PatchEntryConverter.ParseJsonElement(Value, targetType);
+                result[i] = elementParser(jsonArray[i]);
             }
-            return _parsedValue;
+
+            return result;
         }
     }
 }

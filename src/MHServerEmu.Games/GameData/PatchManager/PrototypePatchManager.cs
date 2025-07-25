@@ -1,26 +1,19 @@
-﻿
-using MHServerEmu.Core.Helpers;
+﻿using MHServerEmu.Core.Helpers;
 using MHServerEmu.Core.Logging;
-using MHServerEmu.Core.Memory;
-using MHServerEmu.Games.GameData.Calligraphy;
 using MHServerEmu.Games.GameData.Prototypes;
-using MHServerEmu.Games.Properties;
-using System;
-using System.Collections.Generic;
 using System.ComponentModel;
 using System.Reflection;
 using System.Text.Json;
-using System.Threading.Tasks;
 
 namespace MHServerEmu.Games.GameData.PatchManager
 {
     public class PrototypePatchManager
     {
         private static readonly Logger Logger = LogManager.CreateLogger();
-
-        
+        private Stack<PrototypeId> _protoStack = new();
         private readonly Dictionary<PrototypeId, List<PrototypePatchEntry>> _patchDict = new();
-
+        private Dictionary<Prototype, string> _pathDict = new();
+        private HashSet<string> _processedPaths = new(); // Track processed paths to avoid duplicates
         private bool _initialized = false;
 
         public static PrototypePatchManager Instance { get; } = new();
@@ -29,17 +22,10 @@ namespace MHServerEmu.Games.GameData.PatchManager
         {
             if (enablePatchManager)
             {
-               
                 _initialized = LoadPatchDataFromDisk();
-
-             
-                if (_patchDict.Count > 0)
-                {
-                    Task.Run(() => ApplyAllPatches());
-                }
             }
         }
-
+       
         private bool LoadPatchDataFromDisk()
         {
             string patchDirectory = Path.Combine(FileHelper.DataDirectory, "Game", "Patches");
@@ -49,85 +35,31 @@ namespace MHServerEmu.Games.GameData.PatchManager
             int count = 0;
             var options = new JsonSerializerOptions { Converters = { new PatchEntryConverter() } };
 
-            List<string> patchFiles = ListPool<string>.Instance.Get();
-            try
+            // Read all .json files that start with PatchData
+            foreach (string filePath in FileHelper.GetFilesWithPrefix(patchDirectory, "PatchData", "json"))
             {
-                foreach (string filePath in FileHelper.GetFilesWithPrefix(patchDirectory, "PatchData", "json"))
+                string fileName = Path.GetFileName(filePath);
+
+                PrototypePatchEntry[] updateValues = FileHelper.DeserializeJson<PrototypePatchEntry[]>(filePath, options);
+                if (updateValues == null)
                 {
-                    patchFiles.Add(filePath);
-                }
-
-                foreach (string filePath in patchFiles)
-                {
-                    string fileName = Path.GetFileName(filePath);
-
-                    PrototypePatchEntry[] updateValues = FileHelper.DeserializeJson<PrototypePatchEntry[]>(filePath, options);
-                    if (updateValues == null)
-                    {
-                        Logger.Warn($"LoadPatchDataFromDisk(): Failed to parse {fileName}, skipping");
-                        continue;
-                    }
-
-                    foreach (PrototypePatchEntry value in updateValues)
-                    {
-                        if (value.Enabled == false) continue;
-
-                        PrototypeId prototypeId = GameDatabase.GetPrototypeRefByName(value.Prototype);
-                        if (prototypeId == PrototypeId.Invalid)
-                        {
-                            Logger.Warn($"Could not find prototype ID for '{value.Prototype}' in patch '{value.Description}'. Skipping.");
-                            continue;
-                        }
-                        AddPatchValue(prototypeId, value);
-                        count++;
-                    }
-
-                    Logger.Trace($"Parsed patch data from {fileName}");
-                }
-            }
-            finally
-            {
-                ListPool<string>.Instance.Return(patchFiles);
-            }
-
-            return Logger.InfoReturn(true, $"Loaded {count} patches to be applied after initialization.");
-        }
-
-        // This method now applies ALL patches after the database is initialized.
-        private void ApplyAllPatches()
-        {
-            // This is the "smart timer" that waits for the database to be fully loaded.
-            while (!GameDatabase.IsInitialized)
-            {
-                Task.Delay(100).Wait();
-            }
-
-            Logger.Info("GameDatabase is initialized. Applying all patches...");
-            foreach (var kvp in _patchDict)
-            {
-                PrototypeId prototypeId = kvp.Key;
-                var patches = kvp.Value;
-
-                var prototype = GameDatabase.GetPrototype<Prototype>(prototypeId);
-                if (prototype == null)
-                {
-                    Logger.Warn($"Could not find prototype '{prototypeId.GetName()}' to apply patches.");
+                    Logger.Warn($"LoadPatchDataFromDisk(): Failed to parse {fileName}, skipping");
                     continue;
                 }
 
-                foreach (var entry in patches)
+                foreach (PrototypePatchEntry value in updateValues)
                 {
-                    try
-                    {
-                        ApplyPatchToTarget(entry, prototype);
-                    }
-                    catch (Exception ex)
-                    {
-                        Logger.ErrorException(ex, $"Failed to apply patch: [{entry.Prototype}] [{entry.Path}] {ex.Message}");
-                    }
+                    if (value.Enabled == false) continue;
+                    PrototypeId prototypeId = GameDatabase.GetPrototypeRefByName(value.Prototype);
+                    if (prototypeId == PrototypeId.Invalid) continue;
+                    AddPatchValue(prototypeId, value);
+                    count++;
                 }
+
+                Logger.Trace($"Parsed patch data from {fileName}");
             }
-            Logger.Info("Finished applying all patches.");
+
+            return Logger.InfoReturn(true, $"Loaded {count} patches");
         }
 
         private void AddPatchValue(PrototypeId prototypeId, in PrototypePatchEntry value)
@@ -140,396 +72,507 @@ namespace MHServerEmu.Games.GameData.PatchManager
             patchList.Add(value);
         }
 
-        
-        public bool PreCheck(PrototypeId protoRef) => false;
-        public void PostOverride(Prototype prototype) { }
-        public void SetPath(Prototype parent, Prototype child, string fieldName) { }
-        public void SetPathIndex(Prototype parent, Prototype child, string fieldName, int index) { }
-
-       
-        public bool CheckProperties(PrototypeId protoRef, out PropertyCollection prop)
+        public bool CheckProperties(PrototypeId protoRef, out Properties.PropertyCollection prop)
         {
             prop = null;
-            if (!_initialized) return false;
+            if (_initialized == false) return false;
+
+            if (protoRef != PrototypeId.Invalid && _patchDict.TryGetValue(protoRef, out var list))
+                foreach (var entry in list)
+                    if (entry.Value.ValueType == ValueType.Properties)
+                    {
+                        prop = entry.Value.GetValue() as Properties.PropertyCollection;
+                        return prop != null;
+                    }
+
+            return false;
+        }
+
+        public bool PreCheck(PrototypeId protoRef)
+        {
+            if (_initialized == false) return false;
 
             if (protoRef != PrototypeId.Invalid && _patchDict.TryGetValue(protoRef, out var list))
             {
-                foreach (var entry in list)
-                {
-                    if (entry.Value.ValueType == ValueType.Properties)
-                    {
-                        prop = entry.Value.GetValue() as PropertyCollection;
-                        return prop != null;
-                    }
-                }
+                if (NotPatched(list))
+                    _protoStack.Push(protoRef);
             }
+
+            return _protoStack.Count > 0;
+        }
+
+        private static bool NotPatched(List<PrototypePatchEntry> list)
+        {
+            foreach (var entry in list)
+                if (entry.Patched == false) return true;
             return false;
         }
 
-        private static bool ApplyPatchToTarget(PrototypePatchEntry entry, Prototype prototype)
+        public void PostOverride(Prototype prototype)
         {
-            if (entry.PathSegments.Count == 0) return false;
+            if (_protoStack.Count == 0) return;
 
-            bool success = ApplyNestedPatch(entry, prototype);
+            string currentPath = string.Empty;
+            if (prototype.DataRef == PrototypeId.Invalid
+                && _pathDict.TryGetValue(prototype, out currentPath) == false) return;
 
-            if (success)
+            PrototypeId patchProtoRef = _protoStack.Peek();
+            if (prototype.DataRef != PrototypeId.Invalid)
             {
-                Logger.Trace($"Patch Prototype: {entry.Prototype} {entry.Path} = {entry.Value.GetValue()} (Operation: {entry.Operation})");
-                entry.Patched = true;
+                if (prototype.DataRef != patchProtoRef) return;
+                if (_patchDict.ContainsKey(prototype.DataRef))
+                    patchProtoRef = _protoStack.Pop();
             }
 
-            return success;
-        }
+            if (_patchDict.TryGetValue(patchProtoRef, out var list) == false) return;
 
-        private static bool ApplyNestedPatch(PrototypePatchEntry entry, Prototype prototype)
-        {
-            object currentObject = prototype;
+            // Process patches in order of depth (shallow first, then deeper)
+            var sortedEntries = list.Where(e => !e.Patched)
+                                   .OrderBy(e => GetPathDepth(e.Path))
+                                   .ToList();
 
-            for (int i = 0; i < entry.PathSegments.Count - 1; i++)
+            foreach (var entry in sortedEntries)
             {
-                var segment = entry.PathSegments[i];
-                currentObject = NavigateToSegment(currentObject, segment);
-                if (currentObject == null) return false;
+                if (entry.Patched == false)
+                {
+                    if (CheckAndUpdate(entry, prototype, currentPath))
+                    {
+                        // After successful patch, try to apply any deeper nested patches
+                        ApplyDeeperNestedPatches(entry, prototype, currentPath, list);
+                    }
+                }
             }
 
-            var finalSegment = entry.PathSegments.Last();
-            return ApplyOperationToSegment(currentObject, finalSegment, entry);
+            if (_protoStack.Count == 0)
+            {
+                _pathDict.Clear();
+                _processedPaths.Clear();
+            }
         }
 
-        private static object NavigateToSegment(object obj, PathSegment segment)
+        private static int GetPathDepth(string path)
         {
-            var fieldInfo = obj.GetType().GetProperty(segment.FieldName);
-            if (fieldInfo == null) return null;
+            return path.Count(c => c == '.');
+        }
 
-            object value = fieldInfo.GetValue(obj);
-            if (value == null) return null;
+        private void ApplyDeeperNestedPatches(PrototypePatchEntry parentEntry, Prototype prototype, string currentPath, List<PrototypePatchEntry> allEntries)
+        {
+            string parentPath = NormalizePath(currentPath);
+            string parentEntryPath = NormalizePath(parentEntry.СlearPath);
 
-            foreach (int index in segment.ArrayIndices)
+            // Find entries that are deeper nested under this parent
+            var deeperEntries = allEntries.Where(e => !e.Patched &&
+                                                     e != parentEntry &&
+                                                     IsChildPath(e.СlearPath, parentEntryPath))
+                                         .OrderBy(e => GetPathDepth(e.Path))
+                                         .ToList();
+
+            foreach (var deeperEntry in deeperEntries)
             {
-                if (value is not Array array) return null;
-                if (index < 0 || index >= array.Length) return null;
-                value = array.GetValue(index);
-                if (value == null) return null;
+                ApplyNestedPatch(deeperEntry, prototype, parentPath);
+            }
+        }
+
+        private static bool IsChildPath(string childPath, string parentPath)
+        {
+            if (string.IsNullOrEmpty(parentPath)) return true;
+            return childPath.StartsWith(parentPath + ".");
+        }
+
+        private static string NormalizePath(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return string.Empty;
+            return path.StartsWith('.') ? path[1..] : path;
+        }
+
+        private void ApplyNestedPatch(PrototypePatchEntry entry, Prototype rootPrototype, string currentPath)
+        {
+            try
+            {
+                var pathParts = ParseNestedPath(entry.Path);
+                object targetObject = rootPrototype;
+                string accumulatedPath = currentPath;
+
+                // Navigate to the target object
+                for (int i = 0; i < pathParts.Length - 1; i++)
+                {
+                    var part = pathParts[i];
+                    targetObject = NavigateToProperty(targetObject, part, ref accumulatedPath);
+                    if (targetObject == null) return;
+                }
+
+                // Apply the patch to the final target
+                var finalPart = pathParts[^1];
+                ApplyPatchToTarget(targetObject, finalPart, entry);
+
+                Logger.Trace($"Deep Patch Applied: {entry.Prototype} {entry.Path} = {entry.Value.GetValue()}");
+            }
+            catch (Exception ex)
+            {
+                Logger.WarnException(ex, $"Failed to apply deep nested patch: [{entry.Prototype}] [{entry.Path}] {ex.Message}");
+            }
+        }
+
+        private static PathPart[] ParseNestedPath(string path)
+        {
+            var parts = new List<PathPart>();
+            var segments = path.Split('.');
+
+            foreach (var segment in segments)
+            {
+                if (string.IsNullOrEmpty(segment)) continue;
+
+                var part = new PathPart();
+                int bracketIndex = segment.IndexOf('[');
+
+                if (bracketIndex != -1)
+                {
+                    part.PropertyName = segment[..bracketIndex];
+                    part.IsArray = true;
+
+                    int closeBracket = segment.IndexOf(']', bracketIndex);
+                    if (closeBracket > bracketIndex)
+                    {
+                        string indexStr = segment.Substring(bracketIndex + 1, closeBracket - bracketIndex - 1);
+                        if (int.TryParse(indexStr, out int index))
+                            part.ArrayIndex = index;
+                    }
+                }
+                else
+                {
+                    part.PropertyName = segment;
+                    part.IsArray = false;
+                    part.ArrayIndex = -1;
+                }
+
+                parts.Add(part);
             }
 
-            return value;
+            return parts.ToArray();
         }
 
-        private static bool ApplyOperationToSegment(object targetObject, PathSegment segment, PrototypePatchEntry entry)
+        private object NavigateToProperty(object obj, PathPart pathPart, ref string accumulatedPath)
         {
-            System.Reflection.PropertyInfo fieldInfo = targetObject.GetType().GetProperty(segment.FieldName);
+            if (obj == null) return null;
+
+            var propertyInfo = obj.GetType().GetProperty(pathPart.PropertyName);
+            if (propertyInfo == null) return null;
+
+            object propertyValue = propertyInfo.GetValue(obj);
+            if (propertyValue == null) return null;
+
+            // Update accumulated path
+            accumulatedPath = string.IsNullOrEmpty(accumulatedPath) ? pathPart.PropertyName : $"{accumulatedPath}.{pathPart.PropertyName}";
+
+            if (pathPart.IsArray && pathPart.ArrayIndex >= 0)
+            {
+                if (propertyValue is Array array && pathPart.ArrayIndex < array.Length)
+                {
+                    accumulatedPath += $"[{pathPart.ArrayIndex}]";
+                    return array.GetValue(pathPart.ArrayIndex);
+                }
+                return null;
+            }
+
+            return propertyValue;
+        }
+
+        private static void ApplyPatchToTarget(object targetObject, PathPart finalPart, PrototypePatchEntry entry)
+        {
+            if (targetObject == null) return;
+
+            var propertyInfo = targetObject.GetType().GetProperty(finalPart.PropertyName);
+            if (propertyInfo == null) return;
+
+            if (finalPart.IsArray)
+            {
+                if (finalPart.ArrayIndex >= 0)
+                    SetIndexValue(targetObject, propertyInfo, finalPart.ArrayIndex, entry.Value);
+                else
+                    InsertValue(targetObject, propertyInfo, entry.Value);
+            }
+            else
+            {
+                Type fieldType = propertyInfo.PropertyType;
+                object convertedValue = ConvertValue(entry.Value.GetValue(), fieldType);
+                propertyInfo.SetValue(targetObject, convertedValue);
+            }
+
+            entry.Patched = true;
+        }
+
+        private static bool CheckAndUpdate(PrototypePatchEntry entry, Prototype prototype, string currentPath)
+        {
+            if (currentPath.StartsWith('.')) currentPath = currentPath[1..];
+            if (entry.СlearPath != currentPath) return false;
+
+            var fieldInfo = prototype.GetType().GetProperty(entry.FieldName);
             if (fieldInfo == null) return false;
 
-            switch (entry.Operation)
-            {
-                case PatchOperation.Set:
-                    return HandleSetOperation(targetObject, fieldInfo, segment, entry);
-                case PatchOperation.Add:
-                    return HandleAddOperation(targetObject, fieldInfo, segment, entry);
-                case PatchOperation.Insert:
-                    return HandleInsertOperation(targetObject, fieldInfo, segment, entry);
-                case PatchOperation.Remove:
-                    return HandleRemoveOperation(targetObject, fieldInfo, segment, entry);
-                case PatchOperation.Replace:
-                    return HandleReplaceOperation(targetObject, fieldInfo, segment, entry);
-                default:
-                    throw new NotSupportedException($"Operation {entry.Operation} not supported");
-            }
-        }
-
-        private static bool HandleSetOperation(object targetObject, System.Reflection.PropertyInfo fieldInfo, PathSegment segment, PrototypePatchEntry entry)
-        {
-            if (segment.IsArray)
-            {
-                return SetNestedArrayValue(targetObject, fieldInfo, segment.ArrayIndices, entry.Value);
-            }
-            else
-            {
-                object valueToSet = ConvertValue(entry.Value.GetValue(), fieldInfo.PropertyType);
-                fieldInfo.SetValue(targetObject, valueToSet);
-                return true;
-            }
-        }
-
-        private static bool HandleAddOperation(object targetObject, System.Reflection.PropertyInfo fieldInfo, PathSegment segment, PrototypePatchEntry entry)
-        {
-            if (!fieldInfo.PropertyType.IsArray)
-                throw new InvalidOperationException($"Add operation can only be used on array fields. Field {segment.FieldName} is not an array.");
-
-            Array currentArray = (Array)fieldInfo.GetValue(targetObject);
-            Type elementType = fieldInfo.PropertyType.GetElementType();
-
-            object valueToAdd = entry.Value.GetValue();
-            int elementsToAdd = valueToAdd is Array addArray ? addArray.Length : 1;
-            int currentLength = currentArray?.Length ?? 0;
-            int newLength = currentLength + elementsToAdd;
-
-            Array newArray = Array.CreateInstance(elementType, newLength);
-
-            if (currentArray != null)
-                Array.Copy(currentArray, newArray, currentLength);
-
-            AddElementsToArray(newArray, elementType, valueToAdd, currentLength);
-
-            fieldInfo.SetValue(targetObject, newArray);
-            return true;
-        }
-
-        private static bool HandleInsertOperation(object targetObject, System.Reflection.PropertyInfo fieldInfo, PathSegment segment, PrototypePatchEntry entry)
-        {
-            if (!fieldInfo.PropertyType.IsArray)
-                throw new InvalidOperationException($"Insert operation can only be used on array fields. Field {segment.FieldName} is not an array.");
-
-            if (!segment.IsArray || segment.ArrayIndices.Count != 1)
-                throw new InvalidOperationException("Insert operation requires exactly one array index to specify insertion point.");
-
-            Array currentArray = (Array)fieldInfo.GetValue(targetObject);
-            Type elementType = fieldInfo.PropertyType.GetElementType();
-            int insertIndex = segment.ArrayIndices[0];
-
-            if (insertIndex < 0 || insertIndex > (currentArray?.Length ?? 0))
-                throw new IndexOutOfRangeException($"Insert index {insertIndex} is out of range.");
-
-            object valueToInsert = entry.Value.GetValue();
-            int elementsToInsert = valueToInsert is Array insertArray ? insertArray.Length : 1;
-            int currentLength = currentArray?.Length ?? 0;
-            int newLength = currentLength + elementsToInsert;
-
-            Array newArray = Array.CreateInstance(elementType, newLength);
-
-            if (currentArray != null)
-            {
-                if (insertIndex > 0)
-                    Array.Copy(currentArray, 0, newArray, 0, insertIndex);
-
-                if (insertIndex < currentLength)
-                    Array.Copy(currentArray, insertIndex, newArray, insertIndex + elementsToInsert, currentLength - insertIndex);
-            }
-
-            AddElementsToArray(newArray, elementType, valueToInsert, insertIndex);
-
-            fieldInfo.SetValue(targetObject, newArray);
-            return true;
-        }
-
-        private static bool HandleRemoveOperation(object targetObject, System.Reflection.PropertyInfo fieldInfo, PathSegment segment, PrototypePatchEntry entry)
-        {
-            if (!fieldInfo.PropertyType.IsArray)
-                throw new InvalidOperationException($"Remove operation can only be used on array fields. Field {segment.FieldName} is not an array.");
-
-            Array currentArray = (Array)fieldInfo.GetValue(targetObject);
-            if (currentArray == null || currentArray.Length == 0) return true;
-
-            Type elementType = fieldInfo.PropertyType.GetElementType();
-
-            if (segment.IsArray && segment.ArrayIndices.Count == 1)
-            {
-                int removeIndex = segment.ArrayIndices[0];
-                if (removeIndex < 0 || removeIndex >= currentArray.Length)
-                    throw new IndexOutOfRangeException($"Remove index {removeIndex} is out of range.");
-
-                Array newArray = Array.CreateInstance(elementType, currentArray.Length - 1);
-                int newIndex = 0;
-
-                for (int i = 0; i < currentArray.Length; i++)
-                {
-                    if (i != removeIndex)
-                    {
-                        newArray.SetValue(currentArray.GetValue(i), newIndex++);
-                    }
-                }
-
-                fieldInfo.SetValue(targetObject, newArray);
-            }
-            else
-            {
-                List<object> tempList = ListPool<object>.Instance.Get();
-                try
-                {
-                    object valueToRemove = ConvertValue(entry.Value.GetValue(), elementType);
-
-                    for (int i = 0; i < currentArray.Length; i++)
-                    {
-                        object element = currentArray.GetValue(i);
-                        if (!Equals(element, valueToRemove))
-                            tempList.Add(element);
-                    }
-
-                    Array newArray = Array.CreateInstance(elementType, tempList.Count);
-                    for (int i = 0; i < tempList.Count; i++)
-                        newArray.SetValue(tempList[i], i);
-
-                    fieldInfo.SetValue(targetObject, newArray);
-                }
-                finally
-                {
-                    ListPool<object>.Instance.Return(tempList);
-                }
-            }
+            UpdateValue(prototype, fieldInfo, entry);
+            Logger.Trace($"Patch Prototype: {entry.Prototype} {entry.Path} = {entry.Value.GetValue()}");
 
             return true;
-        }
-
-        private static bool HandleReplaceOperation(object targetObject, System.Reflection.PropertyInfo fieldInfo, PathSegment segment, PrototypePatchEntry entry)
-        {
-            if (!segment.IsArray)
-                throw new InvalidOperationException("Replace operation requires array indices to specify what to replace.");
-
-            return SetNestedArrayValue(targetObject, fieldInfo, segment.ArrayIndices, entry.Value);
-        }
-
-        private static bool SetNestedArrayValue(object targetObject, System.Reflection.PropertyInfo fieldInfo, List<int> indices, ValueBase value)
-        {
-            Array array = (Array)fieldInfo.GetValue(targetObject);
-            if (array == null) return false;
-
-            object currentElement = array;
-
-            for (int i = 0; i < indices.Count - 1; i++)
-            {
-                int index = indices[i];
-                if (currentElement is not Array currentArray) return false;
-                if (index < 0 || index >= currentArray.Length) return false;
-                currentElement = currentArray.GetValue(index);
-                if (currentElement == null) return false;
-            }
-
-            if (currentElement is Array finalArray)
-            {
-                int finalIndex = indices.Last();
-                if (finalIndex < 0 || finalIndex >= finalArray.Length) return false;
-
-                Type elementType = finalArray.GetType().GetElementType();
-
-               
-                object elementValue = GetElementValue(value.GetValue(), elementType);
-                finalArray.SetValue(elementValue, finalIndex);
-                return true;
-            }
-
-            return false;
-        }
-
-        private static void AddElementsToArray(Array targetArray, Type elementType, object valueToAdd, int startIndex)
-        {
-            if (valueToAdd is Array sourceArray)
-            {
-                for (int i = 0; i < sourceArray.Length; i++)
-                {
-                    object elementValue = GetElementValue(sourceArray.GetValue(i), elementType);
-                    targetArray.SetValue(elementValue, startIndex + i);
-                }
-            }
-            else
-            {
-                object elementValue = GetElementValue(valueToAdd, elementType);
-                targetArray.SetValue(elementValue, startIndex);
-            }
         }
 
         public static object ConvertValue(object rawValue, Type targetType)
         {
-            if (rawValue == null || targetType.IsInstanceOfType(rawValue))
+            // Handle nulls immediately
+            if (rawValue == null || (rawValue is JsonElement jsonVal && jsonVal.ValueKind == JsonValueKind.Null))
+                return null;
+
+            // Direct assignment if types already match
+            if (targetType.IsInstanceOfType(rawValue))
                 return rawValue;
 
-            if (rawValue is string stringValue)
+            // Handle array conversion from a JsonElement[] (for PrototypeArray)
+            if (targetType.IsArray && rawValue is JsonElement[] jsonElementArray)
             {
-                if (targetType == typeof(PrototypeId))
-                {
-                    var resolvedId = GameDatabase.GetPrototypeRefByName(stringValue);
-                    if (resolvedId != PrototypeId.Invalid)
-                    {
-                        Logger.Trace($"Successfully resolved prototype name '{stringValue}' to PrototypeId: {resolvedId}");
-                        return resolvedId;
-                    }
-                    Logger.Warn($"Could not resolve prototype name '{stringValue}' to a PrototypeId.");
-                }
+                Type elementType = targetType.GetElementType();
+                Array newArray = Array.CreateInstance(elementType, jsonElementArray.Length);
 
-                if (targetType == typeof(AssetId))
+                for (int i = 0; i < jsonElementArray.Length; i++)
                 {
-                    Logger.Trace($"Attempting to resolve asset name '{stringValue}' to AssetId");
-                    var searchFlags = new[] { DataFileSearchFlags.None, DataFileSearchFlags.CaseInsensitive };
-                    foreach (var flags in searchFlags)
-                    {
-                        foreach (var assetType in AssetDirectory.Instance.IterateAssetTypes())
-                        {
-                            var assetId = assetType.FindAssetByName(stringValue, flags);
-                            if (assetId != AssetId.Invalid)
-                            {
-                                Logger.Trace($"Successfully resolved asset name '{stringValue}' to AssetId: {assetId} in AssetType: {assetType}");
-                                return assetId;
-                            }
-                        }
-                    }
-                    Logger.Warn($"Could not find an asset with the name '{stringValue}' in any loaded AssetType. Available asset types: {string.Join(", ", AssetDirectory.Instance.IterateAssetTypes().Select(at => at.ToString()))}");
+                    // Recursively convert each element of the JsonElement array
+                    object elementValue = ConvertValue(jsonElementArray[i], elementType);
+                    newArray.SetValue(elementValue, i);
                 }
+                return newArray;
             }
 
-            if (rawValue is Array sourceArray && targetType.IsArray)
+            // Handle array conversion from a single JsonElement (for nested arrays)
+            if (targetType.IsArray && rawValue is JsonElement jsonElement && jsonElement.ValueKind == JsonValueKind.Array)
             {
-                var targetElementType = targetType.GetElementType();
-                var newArray = Array.CreateInstance(targetElementType, sourceArray.Length);
-                try
+                Type elementType = targetType.GetElementType();
+                var jsonArray = jsonElement.EnumerateArray().ToArray();
+                Array newArray = Array.CreateInstance(elementType, jsonArray.Length);
+
+                for (int i = 0; i < jsonArray.Length; i++)
                 {
-                    for (int i = 0; i < sourceArray.Length; i++)
-                    {
-                        newArray.SetValue(sourceArray.GetValue(i), i);
-                    }
-                    Logger.Trace($"Successfully converted array from {sourceArray.GetType().Name} to {newArray.GetType().Name} via element-wise copy.");
-                    return newArray;
+                    object elementValue = ConvertValue(jsonArray[i], elementType);
+                    newArray.SetValue(elementValue, i);
                 }
-                catch (InvalidCastException)
-                {
-                    Logger.Warn($"Failed to convert array from {sourceArray.GetType().Name} to {newArray.GetType().Name} due to an invalid element cast.");
-                }
+                return newArray;
+            }
+
+            // Handle complex single objects from JsonElement
+            if (IsComplexObjectType(targetType) && rawValue is JsonElement complexJson && complexJson.ValueKind == JsonValueKind.Object)
+            {
+                return ConvertComplexObject(complexJson, targetType);
+            }
+
+            // Handle Prototypes from JsonElement
+            if (typeof(Prototype).IsAssignableFrom(targetType) && rawValue is JsonElement prototypeJson)
+            {
+                return PatchEntryConverter.ParseJsonPrototype(prototypeJson);
+            }
+
+            // Handle Enums from a string value
+            if (targetType.IsEnum && rawValue is string enumString)
+            {
+                return Enum.Parse(targetType, enumString, true);
+            }
+
+            // Fallback for simple IConvertible types (int, float, bool, etc.)
+            TypeConverter converter = TypeDescriptor.GetConverter(targetType);
+            if (converter != null && converter.CanConvertFrom(rawValue.GetType()))
+                return converter.ConvertFrom(rawValue);
+
+            return Convert.ChangeType(rawValue, targetType);
+        }
+
+        private static bool IsComplexObjectType(Type type)
+        {
+            // Check if the type is a complex object that likely needs JSON parsing
+            return type.IsClass &&
+                   type != typeof(string) &&
+                   !type.IsPrimitive &&
+                   !typeof(Prototype).IsAssignableFrom(type) &&
+                   type.Namespace != null &&
+                   (type.Namespace.Contains("MHServerEmu") || type.Namespace.Contains("Games"));
+        }
+
+        private static object ConvertComplexObject(JsonElement jsonElement, Type targetType)
+        {
+            // This method is for single objects. Arrays are now handled in ConvertValue.
+            if (jsonElement.ValueKind != JsonValueKind.Object)
+            {
+                throw new InvalidOperationException($"Cannot convert JSON of type {jsonElement.ValueKind} to a complex object. Expected a JSON object.");
             }
 
             try
             {
-                TypeConverter converter = TypeDescriptor.GetConverter(targetType);
-                if (converter != null && converter.CanConvertFrom(rawValue.GetType()))
-                {
-                    var convertedValue = converter.ConvertFrom(rawValue);
-                    Logger.Trace($"Successfully converted '{rawValue}' to {targetType.Name} using TypeConverter");
-                    return convertedValue;
-                }
-            }
-            catch (Exception ex)
-            {
-                Logger.Warn($"TypeConverter failed to convert '{rawValue}' to {targetType.Name}: {ex.Message}");
-            }
+                object instance = Activator.CreateInstance(targetType);
+                if (instance == null)
+                    throw new InvalidOperationException($"Cannot create instance of {targetType.Name}");
 
-            try
-            {
-                var convertedValue = Convert.ChangeType(rawValue, targetType);
-                Logger.Trace($"Successfully converted '{rawValue}' to {targetType.Name} using Convert.ChangeType");
-                return convertedValue;
+                // Set properties from JSON
+                foreach (var property in jsonElement.EnumerateObject())
+                {
+                    var propertyInfo = targetType.GetProperty(property.Name);
+                    if (propertyInfo == null || !propertyInfo.CanWrite) continue;
+
+                    try
+                    {
+                        object propertyValue = PatchEntryConverter.ParseJsonElement(property.Value, propertyInfo.PropertyType);
+                        object convertedValue = ConvertValue(propertyValue, propertyInfo.PropertyType);
+                        propertyInfo.SetValue(instance, convertedValue);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.WarnException(ex, $"Failed to set property {property.Name} on {targetType.Name}: {ex.Message}");
+                    }
+                }
+                return instance;
             }
             catch (Exception ex)
             {
-                Logger.Error($"Failed to convert '{rawValue}' to {targetType.Name}: {ex.Message}");
+                Logger.WarnException(ex, $"Failed to convert complex object to {targetType.Name}: {ex.Message}");
                 throw;
+            }
+        }
+
+        private static void UpdateValue(Prototype prototype, PropertyInfo fieldInfo, PrototypePatchEntry entry)
+        {
+            try
+            {
+                Type fieldType = fieldInfo.PropertyType;
+                if (entry.ArrayValue)
+                {
+                    if (entry.ArrayIndex != -1)
+                        SetIndexValue(prototype, fieldInfo, entry.ArrayIndex, entry.Value);
+                    else
+                        InsertValue(prototype, fieldInfo, entry.Value);
+                }
+                else
+                {
+                    object convertedValue = ConvertValue(entry.Value.GetValue(), fieldType);
+                    fieldInfo.SetValue(prototype, convertedValue);
+                }
+                entry.Patched = true;
+            }
+            catch (Exception ex)
+            {
+                Logger.WarnException(ex, $"Failed UpdateValue: [{entry.Prototype}] [{entry.Path}] {ex.Message}");
+            }
+        }
+
+        private static void SetIndexValue(object target, PropertyInfo fieldInfo, int index, ValueBase value)
+        {
+            Type fieldType = fieldInfo.PropertyType;
+            if (fieldType.IsArray == false)
+                throw new InvalidOperationException($"Field {fieldInfo.Name} is not array.");
+
+            Array array = (Array)fieldInfo.GetValue(target);
+            if (array == null || index < 0 || index >= array.Length)
+                throw new IndexOutOfRangeException($"Invalid index {index} for array {fieldInfo.Name}.");
+
+            object valueEntry = value.GetValue();
+            var entryType = valueEntry.GetType();
+            Type elementType = fieldType.GetElementType();
+
+            if (elementType == null || IsTypeCompatible(elementType, entryType, value.ValueType) == false)
+                throw new InvalidOperationException($"Type {value.ValueType} is not assignable to {elementType?.Name}.");
+
+            object converted = ConvertValue(valueEntry, elementType);
+            array.SetValue(converted, index);
+        }
+
+        private static void InsertValue(object target, PropertyInfo fieldInfo, ValueBase value)
+        {
+            Type fieldType = fieldInfo.PropertyType;
+            if (fieldType.IsArray == false)
+                throw new InvalidOperationException($"Field {fieldInfo.Name} is not array.");
+
+            var valueEntry = value.GetValue();
+            var entryType = valueEntry.GetType();
+            Type elementType = fieldType.GetElementType();
+
+            if (elementType == null || IsTypeCompatible(elementType, entryType, value.ValueType) == false)
+                throw new InvalidOperationException($"Type {value.ValueType} is not assignable for {elementType?.Name}.");
+
+            var currentArray = (Array)fieldInfo.GetValue(target);
+            int newLength = CalcNewLength(currentArray, valueEntry);
+            var newArray = Array.CreateInstance(elementType, newLength);
+
+            if (currentArray != null)
+                Array.Copy(currentArray, newArray, currentArray.Length);
+
+            AddElements(newArray, elementType, valueEntry, currentArray?.Length ?? 0);
+            fieldInfo.SetValue(target, newArray);
+        }
+
+        private static int CalcNewLength(Array currentArray, object valueEntry)
+        {
+            int currentLength = currentArray?.Length ?? 0;
+            int valuesCount = 1;
+            if (valueEntry is Array array)
+            {
+                int length = array.Length;
+                if (length > 1) valuesCount = length;
+            }
+            return currentLength + valuesCount;
+        }
+
+        private static bool IsTypeCompatible(Type baseType, Type entryType, ValueType valueType)
+        {
+            if (entryType.IsArray) entryType = entryType.GetElementType();
+            if (valueType == ValueType.PrototypeDataRef || valueType == ValueType.PrototypeDataRefArray)
+                entryType = typeof(Prototype);
+            return baseType.IsAssignableFrom(entryType) || entryType.IsAssignableFrom(baseType);
+        }
+
+        private static void AddElements(Array newArray, Type elementType, object valueEntry, int lastIndex)
+        {
+            if (valueEntry is Array array)
+            {
+                foreach (var entry in array)
+                {
+                    object elementValue = GetElementValue(entry, elementType);
+                    newArray.SetValue(elementValue, lastIndex++);
+                }
+            }
+            else
+            {
+                object elementValue = GetElementValue(valueEntry, elementType);
+                newArray.SetValue(elementValue, lastIndex);
             }
         }
 
         private static object GetElementValue(object valueEntry, Type elementType)
         {
+            //  Handle PrototypeId to Prototype conversion
             if (elementType.IsClass && valueEntry is PrototypeId dataRef)
             {
                 var prototype = GameDatabase.GetPrototype<Prototype>(dataRef)
                     ?? throw new InvalidOperationException($"DataRef {dataRef} is not Prototype.");
                 valueEntry = prototype;
             }
-            else if (valueEntry is Prototype proto)
-            {
-                if (!elementType.IsInstanceOfType(proto))
-                {
-                    return ConvertValue(proto, elementType);
-                }
-                return proto;
-            }
 
             return ConvertValue(valueEntry, elementType);
+        }
+
+        public void SetPath(Prototype parent, Prototype child, string fieldName)
+        {
+            string parentPath = _pathDict.TryGetValue(parent, out var path) ? path : string.Empty;
+            if (parent.DataRef != PrototypeId.Invalid && _patchDict.ContainsKey(parent.DataRef))
+                parentPath = string.Empty;
+            _pathDict[child] = $"{parentPath}.{fieldName}";
+        }
+
+        public void SetPathIndex(Prototype parent, Prototype child, string fieldName, int index)
+        {
+            string parentPath = _pathDict.TryGetValue(parent, out var path) ? path : string.Empty;
+            if (parent.DataRef != PrototypeId.Invalid && _patchDict.ContainsKey(parent.DataRef))
+                parentPath = string.Empty;
+            _pathDict[child] = $"{parentPath}.{fieldName}[{index}]";
+        }
+
+        private struct PathPart
+        {
+            public string PropertyName;
+            public bool IsArray;
+            public int ArrayIndex;
         }
     }
 }
