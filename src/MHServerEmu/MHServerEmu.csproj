@@ -36,6 +36,7 @@
     <ProjectReference Include="..\MHServerEmu.DatabaseAccess\MHServerEmu.DatabaseAccess.csproj" />
     <ProjectReference Include="..\MHServerEmu.Frontend\MHServerEmu.Frontend.csproj" />
     <ProjectReference Include="..\MHServerEmu.Games\MHServerEmu.Games.csproj" />
+	 <ProjectReference Include="..\MHServerEmu.Gifts\MHServerEmu.Gifts.csproj" />
     <ProjectReference Include="..\MHServerEmu.Grouping\MHServerEmu.Grouping.csproj" />
     <ProjectReference Include="..\MHServerEmu.Leaderboards\MHServerEmu.Leaderboards.csproj" />
     <ProjectReference Include="..\MHServerEmu.PlayerManagement\MHServerEmu.PlayerManagement.csproj" />
