@@ -7,30 +7,12 @@ using MHServerEmu.Games.Entities.Avatars;
 using MHServerEmu.Games.GameData;
 using MHServerEmu.Games.Network;
 using MHServerEmu.Games.Powers;
+using MHServerEmu.Games.Regions;
 
 namespace MHServerEmu.Commands.Implementations
 {
-    [CommandGroup("towerold")]
-    [CommandGroupDescription("Teleports to Avengers Tower (original).")]
-    [CommandGroupUserLevel(AccountUserLevel.Admin)]
-    [CommandGroupFlags(CommandGroupFlags.SingleCommand)]
-    public class OldTowerCommand : CommandGroup
-    {
-        [DefaultCommand]
-        [CommandInvokerType(CommandInvokerType.Client)]
-        public string Towerold(string[] @params, NetClient client)
-        {
-            PlayerConnection playerConnection = (PlayerConnection)client;
-
-            // Regions/HUBS/AvengersTowerHUB/Portals/AvengersTowerHUBEntry.prototype
-            playerConnection.MoveToTarget((PrototypeId)16780605467179883619);
-
-            return "Teleporting to Avengers Tower (original)";
-        }
-    }
-
     [CommandGroup("tower")]
-    [CommandGroupDescription("Teleports to Avengers Tower.")]
+    [CommandGroupDescription("Teleports to Avengers Tower (original).")]
     [CommandGroupFlags(CommandGroupFlags.SingleCommand)]
     public class TowerCommand : CommandGroup
     {
@@ -38,12 +20,9 @@ namespace MHServerEmu.Commands.Implementations
         [CommandInvokerType(CommandInvokerType.Client)]
         public string Tower(string[] @params, NetClient client)
         {
-            PlayerConnection playerConnection = (PlayerConnection)client;
-
-            // Regions/HUBS/AvengersTowerHUB/Portals/NPEAvengersTowerHUBEntry.prototype
-            playerConnection.MoveToTarget((PrototypeId)11334277059865941394);
-
-            return "Teleporting to Avengers Tower";
+            Player player = ((PlayerConnection)client).Player;
+            Teleporter.DebugTeleportToTarget(player, (PrototypeId)16780605467179883619);    // Regions/HUBS/AvengersTowerHUB/Portals/AvengersTowerHUBEntry.prototype
+            return "Teleporting to Avengers Tower (original)";
         }
     }
 
@@ -57,31 +36,11 @@ namespace MHServerEmu.Commands.Implementations
         [CommandInvokerType(CommandInvokerType.Client)]
         public string Jail(string[] @params, NetClient client)
         {
-            PlayerConnection playerConnection = (PlayerConnection)client;
-
-            // Regions/Story/CH04EastSide/UpperEastSide/PoliceDepartment/Portals/JailTarget.prototype
-            playerConnection.MoveToTarget((PrototypeId)13284513933487907420);
-
+            Player player = ((PlayerConnection)client).Player;
+            Teleporter.DebugTeleportToTarget(player, (PrototypeId)13284513933487907420);    // Regions/Story/CH04EastSide/UpperEastSide/PoliceDepartment/Portals/JailTarget.prototype
             return "Teleporting to East Side: Detention Facility (old)";
         }
     }
-    [CommandGroup("Strange")]
-    [CommandGroupDescription("Teleports to CosmicDrstrange.")]
-    [CommandGroupFlags(CommandGroupFlags.SingleCommand)]
-    public class WinterCommand : CommandGroup
-    {
-        [DefaultCommand]
-        [CommandInvokerType(CommandInvokerType.Client)]
-        public string Strange(string[] @params, NetClient client)
-        {
-            PlayerConnection playerConnection = (PlayerConnection)client;
-
-            playerConnection.MoveToTarget((PrototypeId)10332456036148718712);
-
-            return "Teleporting to New York.";
-        }
-    }
-   
 
     [CommandGroup("position")]
     [CommandGroupDescription("Shows current position.")]
