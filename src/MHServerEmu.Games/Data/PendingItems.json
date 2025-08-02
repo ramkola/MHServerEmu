@@ -1,0 +1,40 @@
+[
+  {
+    "ItemPrototype": 11000690653486915161,
+    "Count": 1,
+    "AddedDate": "2023-12-20T00:00:00Z",
+    "ClaimedByPlayers": {
+     
+    }
+  },
+  {
+    "ItemPrototype": 92372018352561754,
+    "Count": 2,
+    "AddedDate": "2023-12-21T00:00:00Z",
+    "ClaimedByPlayers": {
+      
+    }
+  },
+  {
+    "ItemPrototype": 13891058503866523227,
+    "Count": 3,
+    "AddedDate": "2025-05-22T00:00:00Z",
+    "ClaimedByPlayers": {
+     
+    }
+  },
+  {
+    "ItemPrototype": 16860880655061163612,
+    "Count": 4,
+    "AddedDate": "2025-06-08T00:00:00Z",
+    "ClaimedByPlayers": {
+     
+    }
+  },
+  {
+    "ItemPrototype": 2914741963682487901,
+    "Count": 5,
+    "AddedDate": "2025-12-24T00:00:00Z",
+    "ClaimedByPlayers": {}
+  }
+]
