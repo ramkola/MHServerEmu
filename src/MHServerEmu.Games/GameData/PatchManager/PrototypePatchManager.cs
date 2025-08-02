@@ -4,7 +4,7 @@ using MHServerEmu.Games.GameData.Prototypes;
 using System.ComponentModel;
 using System.Reflection;
 using System.Text.Json;
-using MHServerEmu.Games.GameData.Calligraphy; // Added for AssetId and GameDatabase access
+using MHServerEmu.Games.GameData.Calligraphy;
 
 namespace MHServerEmu.Games.GameData.PatchManager
 {
@@ -500,10 +500,9 @@ namespace MHServerEmu.Games.GameData.PatchManager
                 throw new IndexOutOfRangeException($"Invalid index {index} for array {fieldInfo.Name}.");
 
             object valueEntry = value.GetValue();
-            var entryType = valueEntry.GetType();
             Type elementType = fieldType.GetElementType();
 
-            if (elementType == null || IsTypeCompatible(elementType, entryType, value.ValueType) == false)
+            if (elementType == null || IsTypeCompatible(elementType, valueEntry, value.ValueType) == false)
                 throw new InvalidOperationException($"Type {value.ValueType} is not assignable to {elementType?.Name}.");
 
             object converted = ConvertValue(valueEntry, elementType);
@@ -517,10 +516,9 @@ namespace MHServerEmu.Games.GameData.PatchManager
                 throw new InvalidOperationException($"Field {fieldInfo.Name} is not array.");
 
             var valueEntry = value.GetValue();
-            var entryType = valueEntry.GetType();
             Type elementType = fieldType.GetElementType();
 
-            if (elementType == null || IsTypeCompatible(elementType, entryType, value.ValueType) == false)
+            if (elementType == null || IsTypeCompatible(elementType, valueEntry, value.ValueType) == false)
                 throw new InvalidOperationException($"Type {value.ValueType} is not assignable for {elementType?.Name}.");
 
             var currentArray = (Array)fieldInfo.GetValue(target);
@@ -546,12 +544,55 @@ namespace MHServerEmu.Games.GameData.PatchManager
             return currentLength + valuesCount;
         }
 
-        private static bool IsTypeCompatible(Type baseType, Type entryType, ValueType valueType)
+        private static bool IsTypeCompatible(Type baseType, object rawValue, ValueType valueType)
         {
-            if (entryType.IsArray) entryType = entryType.GetElementType();
-            if (valueType == ValueType.PrototypeDataRef || valueType == ValueType.PrototypeDataRefArray)
-                entryType = typeof(Prototype);
-            return baseType.IsAssignableFrom(entryType) || entryType.IsAssignableFrom(baseType);
+            // Handle the case where the raw value is an array (e.g., from a JSON array in the patch)
+            if (rawValue is Array rawArray)
+            {
+                // Check if every element in the array is compatible.
+                foreach (var element in rawArray)
+                {
+                    var elementValueType = valueType.ToString().EndsWith("Array")
+                        ? (ValueType)Enum.Parse(typeof(ValueType), valueType.ToString().Replace("Array", ""))
+                        : valueType;
+
+                    if (!IsTypeCompatible(baseType, element, elementValueType))
+                    {
+                        return false;
+                    }
+                }
+                return true; 
+            }
+            if (typeof(Prototype).IsAssignableFrom(baseType))
+            {
+                if (rawValue is PrototypeId dataRef)
+                {
+                    var actualPrototype = GameDatabase.GetPrototype<Prototype>(dataRef);
+                    if (actualPrototype == null)
+                    {
+                        Logger.Warn($"IsTypeCompatible check failed: Could not find prototype for DataRef {dataRef}");
+                        return false;
+                    }
+                    return baseType.IsAssignableFrom(actualPrototype.GetType());
+                }
+                else if (rawValue is JsonElement jsonElement && (valueType == ValueType.Prototype || valueType == ValueType.ComplexObject))
+                {
+                    if (jsonElement.TryGetProperty("ParentDataRef", out var parentDataRefElement) && parentDataRefElement.TryGetUInt64(out var id))
+                    {
+                        var referenceType = (PrototypeId)id;
+                        Type classType = GameDatabase.DataDirectory.GetPrototypeClassType(referenceType);
+                        if (classType != null)
+                        {
+                            return baseType.IsAssignableFrom(classType);
+                        }
+                    }
+                    Logger.Warn($"IsTypeCompatible check failed: Could not determine prototype type from JsonElement.");
+                    return false;
+                }
+            }
+
+            Type entryType = rawValue.GetType();
+            return baseType.IsAssignableFrom(entryType);
         }
 
         private static void AddElements(Array newArray, Type elementType, object valueEntry, int lastIndex)
