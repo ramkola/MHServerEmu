@@ -4,6 +4,7 @@ using MHServerEmu.Games.GameData.Prototypes;
 using System.ComponentModel;
 using System.Reflection;
 using System.Text.Json;
+using MHServerEmu.Games.GameData.Calligraphy; // Added for AssetId and GameDatabase access
 
 namespace MHServerEmu.Games.GameData.PatchManager
 {
@@ -25,7 +26,7 @@ namespace MHServerEmu.Games.GameData.PatchManager
                 _initialized = LoadPatchDataFromDisk();
             }
         }
-       
+
         private bool LoadPatchDataFromDisk()
         {
             string patchDirectory = Path.Combine(FileHelper.DataDirectory, "Game", "Patches");
@@ -317,6 +318,37 @@ namespace MHServerEmu.Games.GameData.PatchManager
 
         public static object ConvertValue(object rawValue, Type targetType)
         {
+            // Handle AssetId lookup from a string value
+            if (targetType == typeof(AssetId) && rawValue is string assetString)
+            {
+                // Example format: "MarvelUIIcons.Power_TaskMaster_BasicShot (Powers/Types/PowerIconPathType.type)"
+                int typeNameStart = assetString.LastIndexOf('(');
+                int typeNameEnd = assetString.LastIndexOf(')');
+
+                if (typeNameStart != -1 && typeNameEnd > typeNameStart)
+                {
+                    string assetName = assetString.Substring(0, typeNameStart).Trim();
+                    string assetTypeName = assetString.Substring(typeNameStart + 1, typeNameEnd - typeNameStart - 1).Trim();
+
+                    var assetDirectory = GameDatabase.DataDirectory.AssetDirectory;
+                    var assetType = assetDirectory.GetAssetType(assetTypeName);
+
+                    if (assetType != null)
+                    {
+                        var assetId = assetType.FindAssetByName(assetName, DataFileSearchFlags.CaseInsensitive);
+                        if (assetId != AssetId.Invalid)
+                        {
+                            return assetId;
+                        }
+                        Logger.Warn($"Could not find asset '{assetName}' in asset type '{assetTypeName}'.");
+                    }
+                    else
+                    {
+                        Logger.Warn($"Could not find asset type '{assetTypeName}'.");
+                    }
+                }
+            }
+
             // Handle nulls immediately
             if (rawValue == null || (rawValue is JsonElement jsonVal && jsonVal.ValueKind == JsonValueKind.Null))
                 return null;
