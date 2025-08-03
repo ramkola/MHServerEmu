@@ -72,10 +72,23 @@ namespace MHServerEmu.Commands.Implementations
             string shutdownRequester = client == null ? "the server console" : client.ToString();
             Logger.Info($"Server shutdown request received from {shutdownRequester}");
 
-            // We need to run shutdown as a separate task in case this command is invoked from the game.
-            // Otherwise, the game thread is going to break, and we are not going to be able to clean up.
-            Task.Run(() => ServerApp.Instance.Shutdown());
-            return string.Empty;
+            // Schedule shutdown with proper error handling
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    // Small delay to ensure command response is sent
+                    await Task.Delay(500);
+                    Logger.Info("Executing scheduled server shutdown...");
+                    ServerApp.Instance.Shutdown();
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error($"Error during shutdown: {ex.Message}");
+                }
+            });
+
+            return "Server shutdown scheduled in 0.5 seconds...";
         }
     }
 }
