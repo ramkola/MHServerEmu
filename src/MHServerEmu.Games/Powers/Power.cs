@@ -2991,6 +2991,7 @@ namespace MHServerEmu.Games.Powers
             if (powerProto.OmniDurationBonusExclude == false)
             {
                 timeMult += owner.Properties[PropertyEnum.OmniDurationBonusPct];
+                //timeMult = MathF.Max(timeMult, 0.5f);
                 timeMult = MathF.Max(timeMult, 0.1f);
             }
 
@@ -3182,7 +3183,8 @@ namespace MHServerEmu.Games.Powers
             cooldown = Clock.Max(cooldown, interruptCooldown);
 
             // Halve the final calculated cooldown duration
-            cooldown *= 0.5f;
+            //cooldown *= 0.5f;
+            cooldown *= 0.1f;
 
             // Make we don't get a negative cooldown
             return Clock.Max(cooldown, TimeSpan.Zero);
