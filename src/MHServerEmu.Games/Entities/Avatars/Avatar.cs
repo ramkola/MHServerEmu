@@ -237,7 +237,8 @@ namespace MHServerEmu.Games.Entities.Avatars
                     try
                     {
                         TimeSpan persistentDuration = (TimeSpan)kvp.Value;
-                        persistentDuration *= 0.5f;
+                        //persistentDuration *= 0.5f;
+                        persistentDuration *= 0.1f;
                         setDict[new(PropertyEnum.PowerCooldownDuration, powerProtoRef)] = persistentDuration;
                     }
                     catch (InvalidCastException ex)
