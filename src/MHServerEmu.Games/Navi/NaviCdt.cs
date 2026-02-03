@@ -1,7 +1,9 @@
 ﻿using MHServerEmu.Core.Collections;
 using MHServerEmu.Core.Collisions;
+using MHServerEmu.Core.Extensions;
 using MHServerEmu.Core.Helpers;
 using MHServerEmu.Core.Logging;
+using MHServerEmu.Core.Memory;
 using MHServerEmu.Core.VectorMath;
 using System.Globalization;
 using System.Text;
@@ -120,9 +122,9 @@ namespace MHServerEmu.Games.Navi
 
         public void RemoveCollinearEdges()
         {
-            List<NaviEdge> checkedEdges = new ();
-            List<NaviEdge> collinearEdges = new ();
-            var naviSerialCheck = new NaviSerialCheck(this);
+            using var checkedEdgesHandle = ListPool<NaviEdge>.Instance.Get(out List<NaviEdge> checkedEdges);
+            using var collinearEdgesHandle = ListPool<NaviEdge>.Instance.Get(out List<NaviEdge> collinearEdges);
+            using NaviSerialCheck naviSerialCheck = new(this);
 
             foreach (var triangle in TriangleList.Iterate())
                 foreach (var edge in triangle.Edges)
@@ -160,7 +162,7 @@ namespace MHServerEmu.Games.Navi
 
             if (edge.TestFlag(NaviEdgeFlags.Constraint) == false) return false;
 
-            var points = new NaviPoint[2];
+            using PoolSpan<NaviPoint> points = PoolSpan<NaviPoint>.Allocate(2);
             var dir = Vector3.Normalize2D(edge.Point(1) - edge.Point(0));
 
             for (int i = 0; i < 2; i++)
@@ -333,7 +335,11 @@ namespace MHServerEmu.Games.Navi
             var p0 = triangle.PointCW(0);
             var p1 = triangle.PointCW(1);
             var p2 = triangle.PointCW(2);
-            NaviPoint[] points = { p0, p1, p2 };
+
+            using PoolSpan<NaviPoint> points = PoolSpan<NaviPoint>.Allocate(3);
+            points[0] = p0;
+            points[1] = p1;
+            points[2] = p2;
 
             Span<bool> degenerates = stackalloc bool[3];
             Span<bool> splits = stackalloc bool[3];
@@ -359,15 +365,17 @@ namespace MHServerEmu.Games.Navi
                 }
             }
 
-            Stack<NaviTriangle> triStack = new ();
+            using var triStackHandle = StackPool<NaviTriangle>.Instance.Get(out PoolableStack<NaviTriangle> triStack);
 
-            NaviEdge[] pointEdges = {
-                new (point, p0, NaviEdgeFlags.None),
-                new (point, p1, NaviEdgeFlags.None),
-                new (point, p2, NaviEdgeFlags.None)
-            };
+            using PoolSpan<NaviEdge> pointEdges = PoolSpan<NaviEdge>.Allocate(3);
+            pointEdges[0] = new(point, p0, NaviEdgeFlags.None);
+            pointEdges[1] = new(point, p1, NaviEdgeFlags.None);
+            pointEdges[2] = new(point, p2, NaviEdgeFlags.None);
 
-            NaviEdge[] triangleEdges = { triangle.Edges[0], triangle.Edges[1], triangle.Edges[2] };
+            using PoolSpan<NaviEdge> triangleEdges = PoolSpan<NaviEdge>.Allocate(3);
+            triangleEdges[0] = triangle.Edges[0];
+            triangleEdges[1] = triangle.Edges[1];
+            triangleEdges[2] = triangle.Edges[2];
 
             NaviTriangleState triangleState = new (triangle);
             RemoveTriangle(triangle);
@@ -586,8 +594,8 @@ namespace MHServerEmu.Games.Navi
                 return;
             }
 
-            List<NaviEdge> pseudoList0 = new ();
-            List<NaviEdge> pseudoList1 = new ();
+            using var pseudoList0Handle = ListPool<NaviEdge>.Instance.Get(out List<NaviEdge> pseudoList0);
+            using var pseudoList1Handle = ListPool<NaviEdge>.Instance.Get(out List<NaviEdge> pseudoList1);
 
             NaviPoint sidePoint0, sidePoint1;
             NaviPoint point = p0;
@@ -610,7 +618,7 @@ namespace MHServerEmu.Games.Navi
             sidePoint1 = splitEdge.Points[side ? 1 : 0];
             pseudoList1.Insert(0, triangle.FindEdge(p0, sidePoint1));            
 
-            Stack<NaviTriangle> triStack = new ();
+            using var triStackHandle = StackPool<NaviTriangle>.Instance.Get(out PoolableStack<NaviTriangle> triStack);
 
             while (triangle.Contains(p1) == false)
             {
@@ -698,10 +706,14 @@ namespace MHServerEmu.Games.Navi
                     }
                 }
 
-                List<NaviEdge> pseudoList0 = new(pseudoList.GetRange(0, indexC + 1));
-                pseudoList.RemoveRange(0, indexC + 1);
+                // Split this into two lists, with the first one having everything up to indexC inclusive.
+                int countC = indexC + 1;
+                using var pseudoList0Handle = ListPool<NaviEdge>.Instance.Get(out List<NaviEdge> pseudoList0);
+                pseudoList0.AddRange(pseudoList, 0, countC);
 
-                List<NaviEdge> pseudoList1 = new(pseudoList);
+                using var pseudoList1Handle = ListPool<NaviEdge>.Instance.Get(out List<NaviEdge> pseudoList1);
+                pseudoList1.AddRange(pseudoList, countC, pseudoList.Count - countC);
+
                 pseudoList.Clear();
 
                 edge0 = TriangulatepseudopolygonDelaunay(pseudoList0, p0, pointC, null, triangleState);
@@ -779,7 +791,7 @@ namespace MHServerEmu.Games.Navi
             var p0 = edge.Points[0];
             var p1 = edge.Points[1];
 
-            Stack<NaviEdge> edgeStack = new ();
+            using var edgeStackHandle = StackPool<NaviEdge>.Instance.Get(out PoolableStack<NaviEdge> edgeStack);
             edge.SetFlag(NaviEdgeFlags.Delaunay);
             edgeStack.Push(edge);
 
@@ -839,8 +851,10 @@ namespace MHServerEmu.Games.Navi
         {
             NaviTriangleState triangleState = new (triangle);
 
-            List<NaviEar> listEar = new ();
-            FixedPriorityQueue<NaviEar> queueEar = new (512);
+            using var listEarHandle = ListPool<NaviEar>.Instance.Get(out List<NaviEar> listEar);
+
+            using var queueEarListHandle = ListPool<NaviEar>.Instance.Get(512, out List<NaviEar> queueEarList);
+            FixedPriorityQueue<NaviEar> queueEar = new(queueEarList);
 
             NaviTriangle it = triangle;
             NaviTriangle nextTriangle;

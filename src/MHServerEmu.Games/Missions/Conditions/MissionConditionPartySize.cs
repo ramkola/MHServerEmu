@@ -21,13 +21,13 @@ namespace MHServerEmu.Games.Missions.Conditions
 
         public override bool OnReset()
         {
-            List<Player> participants = ListPool<Player>.Instance.Get();
+            using var participantsHandle = ListPool<Player>.Instance.Get(out List<Player> participants);
             if (Mission.GetParticipants(participants))
             {
                 foreach (var player in participants)
                 {
                     int partySize = 1;
-                    var party = player.Party;
+                    var party = player.GetParty();
                     if (party != null) partySize = party.NumMembers;
                     if (partySize >= _proto.MinSize && partySize <= _proto.MaxSize)
                     {
@@ -36,7 +36,6 @@ namespace MHServerEmu.Games.Missions.Conditions
                     }
                 }
             }
-            ListPool<Player>.Instance.Return(participants);
 
             ResetCompleted();
             return true;

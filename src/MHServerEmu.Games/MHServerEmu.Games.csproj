@@ -9,7 +9,7 @@
   </PropertyGroup>
 
   <PropertyGroup>
-    <InformationalVersion>0.7.0</InformationalVersion>
+    <InformationalVersion>0.8.1</InformationalVersion>
     <SourceRevisionId>build$([System.DateTime]::UtcNow.ToString("yyyyMMddHHmmss"))</SourceRevisionId>
     <AssemblyVersion>$(InformationalVersion).0</AssemblyVersion>
     <FileVersion>$(AssemblyVersion)</FileVersion>
@@ -31,10 +31,16 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Update="Data\Billing\Catalog.json">
+    <None Update="Data\Game\Achievements\AchievementStringMap.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
-    <None Update="Data\Billing\CatalogPatch.json">
+    <None Update="Data\Game\LiveTuning\LiveTuningDataPvP.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="Data\Game\MTXStore\Catalog.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="Data\Game\MTXStore\CatalogLimitedCostumes.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
     <None Update="Data\Game\Achievements\AchievementContextMap.json">
@@ -43,13 +49,16 @@
     <None Update="Data\Game\Achievements\AchievementInfoMap.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Update="Data\Game\Achievements\Off\AchievementInfoMapParty.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
     <None Update="Data\Game\Achievements\AchievementNewThresholdUS.txt">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
     <None Update="Data\Game\Achievements\AchievementPartyVisible.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
-    <None Update="Data\Game\Achievements\eng.achievements.string">
+    <None Update="Data\Game\MTXStore\CatalogRestoredHeroes.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
     <None Update="Data\Game\Patches\Off\PatchDataCarnival.json">
@@ -67,13 +76,16 @@
     <None Update="Data\Game\Patches\PatchDataBugFixes.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
-    <None Update="Data\Game\LiveTuningData.json">
+    <None Update="Data\Game\LiveTuning\LiveTuningData.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
-    <None Update="Data\Game\LiveTuningDataBugFixes.json">
-      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    <None Update="Data\Game\LiveTuning\LiveTuningDataBugFixes.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
     <None Update="Data\Game\Patches\PatchDataRestoredContent.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="Data\Game\Patches\PatchDataSpecialDrops.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
     <None Update="Data\Game\Patches\PatchDataSpecialEvents.json">

@@ -76,19 +76,19 @@ namespace MHServerEmu.Leaderboards
         {
             switch (message)
             {
-                case GameServiceProtocol.RouteMessage routeMailboxMessage:
+                case ServiceMessage.RouteMessage routeMailboxMessage:
                     OnRouteMailboxMessage(routeMailboxMessage);
                     break;
 
-                case GameServiceProtocol.LeaderboardScoreUpdateBatch leaderboardScoreUpdateBatch:
+                case ServiceMessage.LeaderboardScoreUpdateBatch leaderboardScoreUpdateBatch:
                     _database.EnqueueLeaderboardScoreUpdate(leaderboardScoreUpdateBatch);
                     break;
 
-                case GameServiceProtocol.LeaderboardRewardRequest leaderboardRewardRequest:
+                case ServiceMessage.LeaderboardRewardRequest leaderboardRewardRequest:
                     _rewardManager.OnLeaderboardRewardRequest(leaderboardRewardRequest);
                     break;
 
-                case GameServiceProtocol.LeaderboardRewardConfirmation leaderboardRewardConfirmation:
+                case ServiceMessage.LeaderboardRewardConfirmation leaderboardRewardConfirmation:
                     _rewardManager.OnLeaderboardRewardConfirmation(leaderboardRewardConfirmation);
                     break;
 
@@ -98,12 +98,12 @@ namespace MHServerEmu.Leaderboards
             }
         }
 
-        public string GetStatus()
+        public void GetStatus(Dictionary<string, long> statusDict)
         {
-            return $"Active Leaderboards: {(_database != null ? _database.LeaderboardCount : 0)}";
+            statusDict["Leaderboards"] = _database != null ? _database.LeaderboardCount : 0;
         }
 
-        private void OnRouteMailboxMessage(in GameServiceProtocol.RouteMessage routeMailboxMessage)
+        private void OnRouteMailboxMessage(in ServiceMessage.RouteMessage routeMailboxMessage)
         {
             if (routeMailboxMessage.Protocol != typeof(ClientToGameServerMessage))
             {

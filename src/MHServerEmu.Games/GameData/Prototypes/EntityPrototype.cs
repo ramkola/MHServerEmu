@@ -2,6 +2,7 @@
 using MHServerEmu.Core.Collections;
 using MHServerEmu.Core.Extensions;
 using MHServerEmu.Core.Logging;
+using MHServerEmu.Core.Memory;
 using MHServerEmu.Core.System.Random;
 using MHServerEmu.Core.VectorMath;
 using MHServerEmu.Games.Dialog;
@@ -379,6 +380,11 @@ namespace MHServerEmu.Games.GameData.Prototypes
         public bool HasKeyword(KeywordPrototype keywordProto)
         {
             return keywordProto != null && KeywordPrototype.TestKeywordBit(_keywordsMask, keywordProto);
+        }
+
+        public bool HasKeyword(PrototypeId keyword)
+        {
+            return HasKeyword(GameDatabase.GetPrototype<KeywordPrototype>(keyword));
         }
 
         public bool GetCurrency(out PrototypeId currencyRef, out int amount)
@@ -879,34 +885,32 @@ namespace MHServerEmu.Games.GameData.Prototypes
         {
             AlliancePrototype resultProto = null;
 
-            if (SpawnSequence.HasValue())
+            if (SpawnSequence.IsNullOrEmpty()) return null;
+
+            using var entitiesHandle = HashSetPool<PrototypeId>.Instance.Get(out HashSet<PrototypeId> entities);
+
+            foreach (var sequenceProto in SpawnSequence)
             {
-                HashSet<PrototypeId> entities = new ();
+                if (sequenceProto == null) continue;
+                PopulationObjectPrototype popObject = sequenceProto.GetPopObject();
+                popObject?.GetContainedEntities(entities);
+            }
 
-                foreach (var sequenceProto in SpawnSequence)
+            foreach (var entityRef in entities)
+            {
+                if (entityRef == PrototypeId.Invalid) continue;
+                var proto = GameDatabase.GetPrototype<Prototype>(entityRef);
+                if (proto is AgentPrototype agentProto && agentProto.Alliance != PrototypeId.Invalid)
                 {
-                    if (sequenceProto == null) continue;
-                    PopulationObjectPrototype popObject = sequenceProto.GetPopObject();
-                    popObject?.GetContainedEntities(entities);
-                }
-
-                foreach (var entityRef in entities)
-                {
-                    if (entityRef == PrototypeId.Invalid) continue;                    
-                    var proto = GameDatabase.GetPrototype<Prototype>(entityRef);
-                    if (proto is AgentPrototype agentProto && agentProto.Alliance != PrototypeId.Invalid)
-                    {
-                        var allianceProto = agentProto.Alliance.As<AlliancePrototype>();
-                        if (resultProto == null || resultProto == allianceProto)
-                            resultProto = allianceProto;
-                        else
-                            return null;
-                    }
+                    var allianceProto = agentProto.Alliance.As<AlliancePrototype>();
+                    if (resultProto == null || resultProto == allianceProto)
+                        resultProto = allianceProto;
                     else
-                    {
                         return null;
-                    }
-                   
+                }
+                else
+                {
+                    return null;
                 }
             }
 

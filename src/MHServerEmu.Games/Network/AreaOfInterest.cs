@@ -1,6 +1,7 @@
 ﻿using System.Text;
 using Gazillion;
 using Google.ProtocolBuffers;
+using MHServerEmu.Core.Collections;
 using MHServerEmu.Core.Collisions;
 using MHServerEmu.Core.Extensions;
 using MHServerEmu.Core.Helpers;
@@ -17,6 +18,7 @@ using MHServerEmu.Games.MetaGames;
 using MHServerEmu.Games.Properties;
 using MHServerEmu.Games.Regions;
 using MHServerEmu.Games.Social.Communities;
+using MHServerEmu.Games.Social.Parties;
 
 namespace MHServerEmu.Games.Network
 {
@@ -269,7 +271,7 @@ namespace MHServerEmu.Games.Network
             Region = newRegion;
             _lastUpdatePosition = null;
 
-            List<ulong> removedEntities = ListPool<ulong>.Instance.Get();
+            using var removedEntitiesHandle = ListPool<ulong>.Instance.Get(out List<ulong> removedEntities);
             RemoveEntitiesOnRegionChange(removedEntities, clearingAllInterest);
 
             // Fill in required region change message fields
@@ -301,7 +303,6 @@ namespace MHServerEmu.Games.Network
             }
 
             SendMessage(regionChangeBuilder.Build());
-            ListPool<ulong>.Instance.Return(removedEntities);
 
             // TODO?: Prefetch other regions
 
@@ -442,7 +443,7 @@ namespace MHServerEmu.Games.Network
             Region region = Region;
 
             RegionManager manager = _game.RegionManager;
-            Stack<Cell> invisibleCells = new();
+            using var invisibleCellsHandle = StackPool<Cell>.Instance.Get(out PoolableStack<Cell> invisibleCells);
             bool regenNavi = false;
 
             // search invisible cells
@@ -521,7 +522,7 @@ namespace MHServerEmu.Games.Network
             Region region = Region;
 
             // Update proximity
-            foreach (var worldEntity in region.IterateEntitiesInVolume(_entitiesVolume, new()))
+            foreach (var worldEntity in region.IterateEntitiesInVolume(_entitiesVolume, new(_playerConnection.PlayerDbId)))
             {
                 AOINetworkPolicyValues newInterestPolicies = GetNewInterestPolicies(worldEntity);
                 bool wasInterested = _trackedEntities.TryGetValue(worldEntity.Id, out EntityInterestStatus interestStatus);
@@ -934,6 +935,7 @@ namespace MHServerEmu.Games.Network
             if (entity == null) return Logger.WarnReturn(AOINetworkPolicyValues.AOIChannelNone, "GetNewInterestPolicies(): entity == null");
 
             Player player = _playerConnection.Player;
+            AOINetworkPolicyValues newInterestPolicies = AOINetworkPolicyValues.AOIChannelNone;
 
             // Destroyed and not in game entities cannot have interest
             if (entity.IsDestroyed || entity.IsInGame == false)
@@ -961,15 +963,19 @@ namespace MHServerEmu.Games.Network
             if (restrictedToPlayerGuid != 0 && restrictedToPlayerGuid != player.DatabaseUniqueId)
                 return AOINetworkPolicyValues.AOIChannelNone;
 
-            // Add more filters here
-            WorldEntity worldEntity = entity as WorldEntity;
-            if (worldEntity != null && GameDatabase.InteractionManager.GetVisibilityStatus(player, worldEntity) == false)
+            ulong RestrictedToPlayerGuidParty = entity.Properties[PropertyEnum.RestrictedToPlayerGuidParty];
+            if (RestrictedToPlayerGuidParty != 0 && player.IsInPartyWith(RestrictedToPlayerGuidParty) == false)
                 return AOINetworkPolicyValues.AOIChannelNone;
 
-            AOINetworkPolicyValues newInterestPolicies = AOINetworkPolicyValues.AOIChannelNone;
-
-            if (worldEntity != null)
+            // Do world entity specific checks
+            if (entity is WorldEntity worldEntity)
             {
+                if (worldEntity.IsCloneParent)
+                    return AOINetworkPolicyValues.AOIChannelNone;
+
+                if (GameDatabase.InteractionManager.GetVisibilityStatus(player, worldEntity) == false)
+                    return AOINetworkPolicyValues.AOIChannelNone;
+
                 // Make sure this world entity is in the same region as our interest
                 bool isInRegion = worldEntity.IsInWorld && worldEntity.TestStatus(EntityStatus.ExitingWorld) == false && worldEntity.Region == Region;
 
@@ -990,6 +996,20 @@ namespace MHServerEmu.Games.Network
                 // Discovery - we should not replicate discovered entities not in our region (e.g. saved discoveries from another region or equipped items on nearby avatars)
                 if (isInRegion && player.IsEntityDiscovered(worldEntity))
                     newInterestPolicies |= AOINetworkPolicyValues.AOIChannelDiscovery;
+
+                // Add party / trade policies from the inventory.
+                if (Region != null)
+                {
+                    Player worldEntityOwner = entity.GetOwnerOfType<Player>();
+                    if (worldEntityOwner != null && worldEntityOwner.GetRegion() == Region)
+                    {
+                        if (inventoryInterestPolicies.HasFlag(AOINetworkPolicyValues.AOIChannelParty))
+                            newInterestPolicies |= AOINetworkPolicyValues.AOIChannelParty;
+
+                        if (inventoryInterestPolicies.HasFlag(AOINetworkPolicyValues.AOIChannelTrader))
+                            newInterestPolicies |= AOINetworkPolicyValues.AOIChannelTrader;
+                    }
+                }
             }
 
             // MetaGame is always in proximity
@@ -1002,7 +1022,23 @@ namespace MHServerEmu.Games.Network
             if (entity.IsOwnedBy(player.Id) && (inventory == null || inventoryInterestPolicies.HasFlag(AOINetworkPolicyValues.AOIChannelOwner)))
                 newInterestPolicies |= AOINetworkPolicyValues.AOIChannelOwner;
 
-            // TODO: Party, Trade
+            // Consider other players in the region currently tracked by this AOI (skip players in other regions in the same game instance)
+            if (Region != null && entity is Player otherPlayer && otherPlayer.GetRegion() == Region)
+            {
+                Party party = player.GetParty();
+                if (party != null && otherPlayer.GetParty() == party)
+                    newInterestPolicies |= AOINetworkPolicyValues.AOIChannelParty;
+
+                // Players in the same match region are also considered to be in the same party for AOI visibility purposes.
+                if (Region.MatchNumber != 0)
+                    newInterestPolicies |= AOINetworkPolicyValues.AOIChannelParty;
+
+                if (player.PlayerTradeStatusCode == PlayerTradeStatusCode.ePTSC_TradeInProgress &&
+                    player.PlayerTradePartnerName == otherPlayer.GetName())
+                {
+                    newInterestPolicies |= AOINetworkPolicyValues.AOIChannelTrader;
+                }
+            }
 
             // Filter out results that don't match channels specified in the entity prototype
             if ((newInterestPolicies & entity.CompatibleReplicationChannels) == AOINetworkPolicyValues.AOIChannelNone)
@@ -1040,7 +1076,27 @@ namespace MHServerEmu.Games.Network
 
             if (inventoryPrototype.VisibleToTrader || inventoryPrototype.VisibleToParty)
             {
-                // TODO
+                if (container.GetRootOwner() is Player containerRootPlayer)
+                {
+                    if (inventoryPrototype.VisibleToParty)
+                    {
+                        Party party = player.GetParty();
+                        if (party != null && containerRootPlayer.GetParty() == party)
+                            interestPolicies |= AOINetworkPolicyValues.AOIChannelParty;
+
+                        // Players in the same match region are also considered to be in the same party for AOI visibility purposes.
+                        Region region = player.GetRegion();
+                        if (region != null && region.MatchNumber != 0)
+                            interestPolicies |= AOINetworkPolicyValues.AOIChannelParty;
+                    }
+
+                    if (inventoryPrototype.VisibleToTrader &&
+                        player.PlayerTradeStatusCode == PlayerTradeStatusCode.ePTSC_TradeInProgress &&
+                        player.PlayerTradePartnerName == containerRootPlayer.GetName())
+                    {
+                        interestPolicies |= AOINetworkPolicyValues.AOIChannelTrader;
+                    }
+                }
             }
 
             if (inventoryPrototype.VisibleToProximity)

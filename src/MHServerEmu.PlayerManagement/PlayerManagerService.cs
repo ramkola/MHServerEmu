@@ -1,28 +1,44 @@
 ﻿using System.Diagnostics;
 using Gazillion;
-using Google.ProtocolBuffers;
 using MHServerEmu.Core.Config;
 using MHServerEmu.Core.Logging;
 using MHServerEmu.Core.Network;
 using MHServerEmu.Games;
+using MHServerEmu.PlayerManagement.Auth;
+using MHServerEmu.PlayerManagement.Games;
+using MHServerEmu.PlayerManagement.Matchmaking;
+using MHServerEmu.PlayerManagement.Network;
+using MHServerEmu.PlayerManagement.Players;
+using MHServerEmu.PlayerManagement.Regions;
+using MHServerEmu.PlayerManagement.Social;
 
 namespace MHServerEmu.PlayerManagement
 {
     /// <summary>
     /// An <see cref="IGameService"/> that manages connected players and routes messages to relevant <see cref="Game"/> instances.
     /// </summary>
-    public class PlayerManagerService : IGameService, IMessageBroadcaster
+    public class PlayerManagerService : IGameService
     {
         public const int TargetTickTimeMS = 150;
 
         private static readonly Logger Logger = LogManager.CreateLogger();
 
         private readonly Stopwatch _stopwatch = Stopwatch.StartNew();
+        private readonly PlayerManagerServiceMailbox _serviceMailbox;
+
+        internal static PlayerManagerService Instance { get; private set; }     // Naughty singleton-like access without being an actual singleton
 
         internal SessionManager SessionManager { get; }
         internal LoginQueueManager LoginQueueManager { get; }
         internal GameHandleManager GameHandleManager { get; }
+        internal WorldManager WorldManager { get; }
         internal ClientManager ClientManager { get; }
+        internal CommunityRegistry CommunityRegistry { get; }
+        internal MasterPartyManager PartyManager { get; }
+        internal MasterGuildManager GuildManager { get; }
+        internal RegionRequestQueueManager RegionRequestQueueManager { get; }
+
+        internal PlayerManagerEventScheduler EventScheduler { get; }
 
         public PlayerManagerConfig Config { get; }
 
@@ -33,10 +49,19 @@ namespace MHServerEmu.PlayerManagement
         /// </summary>
         public PlayerManagerService()
         {
+            _serviceMailbox = new(this);
+
             SessionManager = new(this);
             LoginQueueManager = new(this);
-            GameHandleManager = new();
+            GameHandleManager = new(this);
+            WorldManager = new(this);
             ClientManager = new(this);
+            CommunityRegistry = new(this);
+            PartyManager = new(this);
+            GuildManager = new(this);
+            RegionRequestQueueManager = new(this);
+
+            EventScheduler = new();
 
             Config = ConfigManager.Instance.GetConfig<PlayerManagerConfig>();
         }
@@ -45,21 +70,26 @@ namespace MHServerEmu.PlayerManagement
 
         public void Run()
         {
+            Instance = this;
             State = GameServiceState.Starting;
 
-            GameHandleManager.Initialize(Config.GameInstanceCount, Config.PlayerCountDivisor);
+            PlayerNameValidator.Instance.Initialize();
+            GuildManager.Initialize();
+            RegionRequestQueueManager.Initialize();
 
             State = GameServiceState.Running;
-
-            // Normal ticks
             while (State == GameServiceState.Running)
             {
                 TimeSpan referenceTime = _stopwatch.Elapsed;
 
+                _serviceMailbox.ProcessMessages();
+
                 SessionManager.Update();
                 LoginQueueManager.Update();
-                GameHandleManager.Update();
-                ClientManager.Update(true);
+                ClientManager.Update();
+                CommunityRegistry.Update();
+
+                EventScheduler.TriggerEvents();
 
                 double tickTimeMS = (_stopwatch.Elapsed - referenceTime).TotalMilliseconds;
                 int sleepTimeMS = (int)Math.Max(TargetTickTimeMS - tickTimeMS, 0);
@@ -70,17 +100,18 @@ namespace MHServerEmu.PlayerManagement
             // Shutdown
 
             // Shutting down the frontend will disconnect all clients, here we just wait for everything to be cleaned up and saved
+            ClientManager.AllowNewClients = false;
             while (ClientManager.PlayerCount > 0)
             {
-                ClientManager.Update(false);
+                _serviceMailbox.ProcessMessages();
+                ClientManager.Update();
                 Thread.Sleep(1);
             }
 
-            GameHandleManager.IsShuttingDown = true;
-            GameHandleManager.ShutDownAllGames();
+            GameHandleManager.Shutdown();
             while (GameHandleManager.GameCount > 0)
             {
-                GameHandleManager.Update();
+                _serviceMailbox.ProcessMessages();
                 Thread.Sleep(1);
             }
 
@@ -96,39 +127,27 @@ namespace MHServerEmu.PlayerManagement
         {
             switch (message)
             {
-                // Message buffers are routed asynchronously rather than in ticks to have the lowest latency possible.
-                case GameServiceProtocol.RouteMessageBuffer routeMessagePackage:
+                // Message buffers are routed right away to have the lowest latency possible.
+                case ServiceMessage.RouteMessageBuffer routeMessagePackage:
                     OnRouteMessageBuffer(routeMessagePackage);
                     break;
 
-                case GameServiceProtocol.RouteMessage routeMessage:
-                    OnRouteMessage(routeMessage);
-                    break;
-
-                // Game instance operation messages are handled in ticks by the GameHandleManager
-                case GameServiceProtocol.GameInstanceOp gameInstanceOp:
-                    GameHandleManager.ReceiveMessage(gameInstanceOp);
-                    break;
-                
-                // Client messages are handled in ticks by the ClientManager
-                case GameServiceProtocol.AddClient:
-                case GameServiceProtocol.RemoveClient:
-                case GameServiceProtocol.GameInstanceClientOp:
-                    ClientManager.ReceiveMessage(message);
-                    break;
-
+                // Regular service messages are handled by the service thread when the next tick comes.
                 default:
-                    Logger.Warn($"ReceiveServiceMessage(): Unhandled service message type {typeof(T).Name}");
+                    _serviceMailbox.PostMessage(message);
                     break;
             }
         }
 
-        public string GetStatus()
+        public void GetStatus(Dictionary<string, long> statusDict)
         {
-            return $"Games: {GameHandleManager.GameCount} | Players: {ClientManager.PlayerCount} | Sessions: {SessionManager.ActiveSessionCount} [{SessionManager.PendingSessionCount}]";
+            statusDict["PlayerManagerGames"] = GameHandleManager.GameCount;
+            statusDict["PlayerManagerPlayers"] = ClientManager.PlayerCount;
+            statusDict["PlayerManagerActiveSessions"] = SessionManager.ActiveSessionCount;
+            statusDict["PlayerManagerPendingSessions"] = SessionManager.PendingSessionCount;
         }
 
-        private void OnRouteMessageBuffer(in GameServiceProtocol.RouteMessageBuffer routeMessageBuffer)
+        private void OnRouteMessageBuffer(in ServiceMessage.RouteMessageBuffer routeMessageBuffer)
         {
             IFrontendClient client = routeMessageBuffer.Client;
             MessageBuffer messageBuffer = routeMessageBuffer.MessageBuffer;
@@ -145,19 +164,6 @@ namespace MHServerEmu.PlayerManagement
             }
         }
 
-        private void OnRouteMessage(in GameServiceProtocol.RouteMessage routeMessage)
-        {
-            IFrontendClient client = routeMessage.Client;
-            MailboxMessage message = routeMessage.Message;
-
-            switch ((FrontendProtocolMessage)message.Id)
-            {
-                case FrontendProtocolMessage.ClientCredentials: OnClientCredentials(client, message); break;
-
-                default: Logger.Warn($"Handle(): Unhandled {(ClientToGameServerMessage)message.Id} [{message.Id}]"); break;
-            }
-        }
-
         #endregion
 
         #region Player Management
@@ -170,67 +176,18 @@ namespace MHServerEmu.PlayerManagement
             return SessionManager.TryGetActiveSession(sessionId, out session);
         }
 
-        /// <summary>
-        /// Sends an <see cref="IMessage"/> to all connected <see cref="IFrontendClient"/> instances.
-        /// </summary>
-        public void BroadcastMessage(IMessage message)
+        #endregion
+
+        #region Metrics
+
+        public void GetRegionReportData(RegionReport report)
         {
-            ClientManager.BroadcastMessage(message);
+            WorldManager.GetRegionReportData(report);
         }
 
         #endregion
 
         #region Message Handling
-
-        /// <summary>
-        /// Handles <see cref="LoginDataPB"/>.
-        /// </summary>
-        public AuthStatusCode OnLoginDataPB(LoginDataPB loginDataPB, out AuthTicket authTicket)
-        {
-            authTicket = AuthTicket.DefaultInstance;
-
-            var statusCode = SessionManager.TryCreateSessionFromLoginDataPB(loginDataPB, out ClientSession session);
-
-            if (statusCode == AuthStatusCode.Success)
-            {
-                // Avoid extra allocations and copying by using Unsafe.FromBytes() for session key and token
-                authTicket = AuthTicket.CreateBuilder()
-                    .SetSessionKey(ByteString.Unsafe.FromBytes(session.Key))
-                    .SetSessionToken(ByteString.Unsafe.FromBytes(session.Token))
-                    .SetSessionId(session.Id)
-                    .SetFrontendServer(IFrontendClient.FrontendAddress)
-                    .SetFrontendPort(IFrontendClient.FrontendPort)
-                    .SetPlatformTicket("")
-                    .SetHasnews(Config.ShowNewsOnLogin)
-                    .SetNewsurl(Config.NewsUrl)
-                    .SetSuccess(true)
-                    .Build();
-            }
-
-            return statusCode;
-        }
-
-        /// <summary>
-        /// Handles <see cref="ClientCredentials"/>.
-        /// </summary>
-        private bool OnClientCredentials(IFrontendClient client, MailboxMessage message)
-        {
-            var clientCredentials = message.As<ClientCredentials>();
-            if (clientCredentials == null) return Logger.WarnReturn(false, "OnClientCredentials(): clientCredentials == null");
-
-            if (SessionManager.VerifyClientCredentials(client, clientCredentials) == false)
-            {
-                Logger.Warn($"OnClientCredentials(): Failed to verify client credentials, disconnecting client [{client}]");
-                client.Disconnect();
-                return false;
-            }
-
-            // Success!
-            Logger.Info($"Successful auth for client [{client}]");
-            LoginQueueManager.EnqueueNewClient(client);
-
-            return true;
-        }
 
         /// <summary>
         /// Handles <see cref="NetMessageReadyForGameJoin"/>.

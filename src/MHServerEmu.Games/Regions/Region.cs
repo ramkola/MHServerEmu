@@ -6,6 +6,7 @@ using MHServerEmu.Core.Extensions;
 using MHServerEmu.Core.Helpers;
 using MHServerEmu.Core.Logging;
 using MHServerEmu.Core.Memory;
+using MHServerEmu.Core.Network;
 using MHServerEmu.Core.Serialization;
 using MHServerEmu.Core.System.Time;
 using MHServerEmu.Core.VectorMath;
@@ -14,6 +15,7 @@ using MHServerEmu.Games.DRAG;
 using MHServerEmu.Games.DRAG.Generators.Regions;
 using MHServerEmu.Games.Entities;
 using MHServerEmu.Games.Entities.Avatars;
+using MHServerEmu.Games.Entities.Inventories;
 using MHServerEmu.Games.Entities.Locomotion;
 using MHServerEmu.Games.Events;
 using MHServerEmu.Games.GameData;
@@ -94,6 +96,8 @@ namespace MHServerEmu.Games.Regions
         public bool IsPrivate { get => Prototype != null && Prototype.IsPrivate; }
         public RegionBehavior Behavior { get => Prototype != null ? Prototype.Behavior : RegionBehavior.Invalid; }
         public bool CanBeLastTown { get => Behavior == RegionBehavior.Town || PrototypeDataRef == GameDatabase.GlobalsPrototype.PrestigeRegionProtoRef; }
+        public bool AllowsPartyFormation { get => Prototype != null && Prototype.PartyFormationAllowed; }
+        public bool IsQueueRegion { get => Prototype != null && Prototype.IsQueueRegion; }
 
         public Aabb Aabb { get; private set; }
         public Aabb2 Aabb2 { get => new(Aabb); }
@@ -110,7 +114,7 @@ namespace MHServerEmu.Games.Regions
         public int PlayerCount { get => _players.Count; }
 
         public Dictionary<uint, Area> Areas { get; } = new();
-        public IEnumerable<Cell> Cells { get => IterateCellsInVolume(Aabb); }
+        public CellSpatialPartition.ElementIterator<Aabb> Cells { get => IterateCellsInVolume(Aabb); }
         public IEnumerable<Entity> Entities { get => Game.EntityManager.IterateEntities(this); }
 
         // ArchiveData
@@ -155,6 +159,9 @@ namespace MHServerEmu.Games.Regions
         public Event<PlayerInteractGameEvent> PlayerInteractEvent = new();
         public Event<EntityAggroedGameEvent> EntityAggroedEvent = new();
         public Event<AdjustHealthGameEvent> AdjustHealthEvent = new();
+
+        public Event<EntityEnteredCombatGameEvent> EntityEnteredCombatEvent = new();
+        public Event<EntityExitedCombatGameEvent> EntityExitedCombatEvent = new();
         public Event<EntityEnteredMissionHotspotGameEvent> EntityEnteredMissionHotspotEvent = new();
         public Event<EntityLeftMissionHotspotGameEvent> EntityLeftMissionHotspotEvent = new();
         public Event<EntityLeaveDormantGameEvent> EntityLeaveDormantEvent = new();
@@ -190,6 +197,7 @@ namespace MHServerEmu.Games.Regions
         public Event<PlayerEnteredAreaGameEvent> PlayerEnteredAreaEvent = new();
         public Event<PlayerLeftAreaGameEvent> PlayerLeftAreaEvent = new();
         public Event<PartySizeChangedGameEvent> PartySizeChangedEvent = new();
+        public Event<PlayerLeavePartyGameEvent> PlayerLeavePartyEvent = new();
         public Event<PlayerSwitchedToAvatarGameEvent> PlayerSwitchedToAvatarEvent = new();
         public Event<PlayerFactionChangedGameEvent> PlayerFactionChangedEvent = new();
         public Event<PlayerCollectedItemGameEvent> PlayerCollectedItemEvent = new();
@@ -451,8 +459,14 @@ namespace MHServerEmu.Games.Regions
             else _statusFlag ^= status;
         }
 
-        public void Shutdown()
+        public void Shutdown(bool logLifetime)
         {
+            if (logLifetime)
+            {
+                TimeSpan lifetime = Clock.UnixTime - CreatedTime;
+                Logger.Info($"Shutdown(): Region = {this}, Lifetime = {(int)lifetime.TotalMinutes} min {lifetime:ss} sec");
+            }
+
             SetStatus(RegionStatus.Shutdown, true);
 
             /* int tries = 100;
@@ -497,14 +511,6 @@ namespace MHServerEmu.Games.Regions
                 MetaGames.Remove(metaGameId);
             }
 
-            // Destroy entrance portal
-            // REMOVEME: This should be handled by the PlayerManager
-            if (Settings.PortalEntityDbId != 0)
-            {
-                var portal = entityManager.GetEntityByDbGuid<Entity>(Settings.PortalEntityDbId);
-                portal?.Destroy();
-            }
-
             while (Areas.Count > 0)
             {
                 var areaId = Areas.First().Key;
@@ -529,7 +535,9 @@ namespace MHServerEmu.Games.Regions
             if (ShutdownRequested)
                 return;
 
-            Game.RegionManager.RequestRegionShutdown(Id);
+            ServiceMessage.RequestRegionShutdown message = new(Id);
+            ServerManager.Instance.SendMessageToService(GameServiceType.PlayerManager, message);
+
             ShutdownRequested = true;
             Logger.Trace($"Shutdown requested for region [{this}]");
         }
@@ -681,12 +689,12 @@ namespace MHServerEmu.Games.Regions
             return null;
         }
 
-        public IEnumerable<Cell> IterateCellsInVolume<B>(B bounds) where B : IBounds
+        public CellSpatialPartition.ElementIterator<TVolume> IterateCellsInVolume<TVolume>(TVolume volume) where TVolume : IBounds
         {
-            if (CellSpatialPartition != null)
-                return CellSpatialPartition.IterateElementsInVolume(bounds);
-            else
-                return Enumerable.Empty<Cell>(); //new CellSpatialPartition.ElementIterator();
+            if (CellSpatialPartition == null)
+                return default;
+
+            return CellSpatialPartition.IterateElementsInVolume(volume);
         }
 
         #endregion
@@ -697,28 +705,28 @@ namespace MHServerEmu.Games.Regions
         public void UpdateEntityInSpatialPartition(WorldEntity entity) => EntitySpatialPartition.Update(entity);
         public bool RemoveEntityFromSpatialPartition(WorldEntity entity) => EntitySpatialPartition.Remove(entity);
 
-        public IEnumerable<WorldEntity> IterateEntitiesInRegion(EntityRegionSPContext context)
+        public EntityRegionSpatialPartition.ElementIterator<Aabb> IterateEntitiesInRegion(EntityRegionSPContext context)
         {
             return IterateEntitiesInVolume(Aabb, context);
         }
 
-        public IEnumerable<WorldEntity> IterateEntitiesInVolume<B>(B bound, EntityRegionSPContext context) where B : IBounds
+        public EntityRegionSpatialPartition.ElementIterator<TVolume> IterateEntitiesInVolume<TVolume>(TVolume volume, EntityRegionSPContext context) where TVolume : IBounds
         {
-            if (EntitySpatialPartition != null)
-                return EntitySpatialPartition.IterateElementsInVolume(bound, context);
-            else
-                return Enumerable.Empty<WorldEntity>();
+            if (EntitySpatialPartition == null)
+                return default;
+
+            return EntitySpatialPartition.IterateElementsInVolume(volume, context);
         }
 
-        public IEnumerable<Avatar> IterateAvatarsInVolume(in Sphere bound)
+        public EntityRegionSpatialPartition.RegionAvatarIterator IterateAvatarsInVolume(in Sphere bound)
         {
-            if (EntitySpatialPartition != null)
-                return EntitySpatialPartition.IterateAvatarsInVolume(bound);
-            else
-                return Enumerable.Empty<Avatar>();
+            if (EntitySpatialPartition == null)
+                return default;
+
+            return EntitySpatialPartition.IterateAvatarsInVolume(bound);
         }
 
-        public void GetEntitiesInVolume<B>(List<WorldEntity> entities, B volume, EntityRegionSPContext context) where B : IBounds
+        public void GetEntitiesInVolume<TVolume>(List<WorldEntity> entities, TVolume volume, EntityRegionSPContext context) where TVolume : IBounds
         {
             EntitySpatialPartition?.GetElementsInVolume(entities, volume, context);
         }
@@ -868,8 +876,8 @@ namespace MHServerEmu.Games.Regions
                 }
             }
         }
-        
-        public bool ContainsPvPMatch()
+
+        public PvP GetPvPMatch()
         {
             EntityManager entityManager = Game.EntityManager;
 
@@ -883,10 +891,15 @@ namespace MHServerEmu.Games.Regions
                     continue;
 
                 if (pvpProto.IsPvP)
-                    return true;
+                    return pvp;
             }
 
-            return false;
+            return null;
+        }
+
+        public bool ContainsPvPMatch()
+        {
+            return GetPvPMatch() != null;
         }
 
         private void SetRegionLevel()
@@ -1220,9 +1233,8 @@ namespace MHServerEmu.Games.Regions
             float minTime = 1.0f;
             float minDot = -1f;
             WorldEntity hitEntity = null;
-            var spContext = new EntityRegionSPContext(EntityRegionSPContextFlags.All);
 
-            foreach (var otherEntity in IterateEntitiesInVolume(sweepBox, spContext))
+            foreach (var otherEntity in IterateEntitiesInVolume(sweepBox, new()))
             {
                 if (canBlockFunc(otherEntity))
                 {
@@ -1337,7 +1349,7 @@ namespace MHServerEmu.Games.Regions
             if (posFlags.HasFlag(PositionCheckFlags.CanBeBlockedEntity) || posFlags.HasFlag(PositionCheckFlags.CanPathToEntities))
             {
                 entitiesInRadius.Capacity = 256;
-                GetEntitiesInVolume(entitiesInRadius, new Sphere(point, maxDistanceFromPoint), new EntityRegionSPContext(EntityRegionSPContextFlags.ActivePartition));
+                GetEntitiesInVolume(entitiesInRadius, new Sphere(point, maxDistanceFromPoint), new EntityRegionSPContext(EntityRegionSPContextFlags.PrimaryPartition));
 
                 if (posFlags.HasFlag(PositionCheckFlags.CanBeBlockedEntity) && checkPredicate != null)
                 {
@@ -1481,7 +1493,7 @@ namespace MHServerEmu.Games.Regions
             if (posFlags.HasFlag(PositionCheckFlags.CanBeBlockedEntity) || posFlags.HasFlag(PositionCheckFlags.CanBeBlockedAvatar))
             {
                 var volume = new Sphere(bounds.Center, bounds.Radius);
-                foreach (WorldEntity entity in IterateEntitiesInVolume(volume, new(EntityRegionSPContextFlags.ActivePartition)))
+                foreach (WorldEntity entity in IterateEntitiesInVolume(volume, new(EntityRegionSPContextFlags.PrimaryPartition)))
                 {
                     if (posFlags.HasFlag(PositionCheckFlags.CanBeBlockedAvatar) && entity is not Avatar) continue;
                     if (IsBoundsBlockedByEntity(bounds, entity, blockFlags))
@@ -1560,6 +1572,8 @@ namespace MHServerEmu.Games.Regions
             // Track this player
             if (_players.Add(player.Id) == false)
                 Logger.Warn($"OnAddedToAOI(): Failed to add player id {player.Id}");
+
+            player.TriggerInventoryCleanupEvent(InventoryEvent.RegionChange);
         }
 
         public void OnRemovedFromAOI(Player player)
@@ -1599,7 +1613,7 @@ namespace MHServerEmu.Games.Regions
             if (IsFirstLoaded) return;
             IsFirstLoaded = true;
 
-            List<PrototypeId> timerRefList = ListPool<PrototypeId>.Instance.Get();
+            using var timerRefListHandle = ListPool<PrototypeId>.Instance.Get(out List<PrototypeId> timerRefList);
 
             foreach (var kvp in Properties.IteratePropertyRange(PropertyEnum.ScoringEventTimerStartTimeMS))
             {
@@ -1612,8 +1626,6 @@ namespace MHServerEmu.Games.Regions
 
             foreach (PrototypeId timerRef in timerRefList)
                 ScoringEventTimerStart(timerRef);
-
-            ListPool<PrototypeId>.Instance.Return(timerRefList);
         }
 
         public bool GetInterestedClients(List<PlayerConnection> interestedClientList, AOINetworkPolicyValues interestPolicies)
@@ -1828,13 +1840,46 @@ namespace MHServerEmu.Games.Regions
 
         public void OnRecordPlayerDeath(Player player, Avatar avatar, WorldEntity killer)
         {
-            if (player == null) return;
+            if (player == null)
+                return;
 
-            /*  TODO PvP
-                PropertyEnum.PvPDeathsDuringMatch
-                PropertyEnum.PvPKillsDuringMatch
-                PropertyEnum.PvPKills
-            */
+            // NOTE: Recording it here instead of Avatar.OnKilled() will make these count when cheat death procs activate. Is this how it's supposed to work?
+            if (ShouldRecordPlayerDeath() && avatar != null)
+            {
+                if (avatar.IsInPvPMatch)
+                {
+                    if (killer != null)
+                    {
+                        Avatar killerAvatar = null;
+
+                        ulong xpTransferToId = killer.Properties[PropertyEnum.XPTransferToID];
+                        if (xpTransferToId != Entity.InvalidId)
+                            killerAvatar = Game.EntityManager.GetEntity<Avatar>(xpTransferToId);
+
+                        killerAvatar ??= killer.GetMostResponsiblePowerUser<Avatar>();
+
+                        if (killerAvatar != null)
+                        {
+                            killerAvatar.Properties.AdjustProperty(1, PropertyEnum.PvPKills);
+
+                            // not used in PvP.UpdatePlayerCollection
+                            /* 
+                            int killerMatchIndex = killerAvatar.Properties[PropertyEnum.PvPLastMatchIndex];
+                            killerAvatar.Properties.AdjustProperty(1, new(PropertyEnum.PvPKillsDuringMatch, (PropertyParam)killerMatchIndex));
+
+                            int victimMatchIndex = avatar.Properties[PropertyEnum.PvPLastMatchIndex];
+                            avatar.Properties.AdjustProperty(1, new(PropertyEnum.PvPDeathsDuringMatch, (PropertyParam)victimMatchIndex));
+                            */
+                        }
+                    }
+
+                    avatar.Properties.AdjustProperty(1, PropertyEnum.PvPDeaths);
+                }
+                else
+                {
+                    avatar.Properties.AdjustProperty(1, PropertyEnum.NumberOfDeaths);
+                }
+            }
 
             if (Properties.HasProperty(PropertyEnum.EndlessLevel))
                 player.Properties.AdjustProperty(1, PropertyEnum.EndlessLevelDeathCount);
@@ -1842,6 +1887,24 @@ namespace MHServerEmu.Games.Regions
             _playerDeaths++;
 
             PlayerDeathRecordedEvent.Invoke(new(player));
+        }
+
+        public bool ShouldRecordPlayerDeath()
+        {
+            // Record deaths unless this a PvP region that has death recording explicitly disabled.
+            EntityManager entityManager = Game.EntityManager;
+
+            foreach (ulong metaGameId in MetaGames)
+            {
+                PvP pvp = entityManager.GetEntity<PvP>(metaGameId);
+                if (pvp == null)
+                    continue;
+
+                if (pvp.PvPPrototype?.RecordPlayerDeaths == false)
+                    return false;
+            }
+
+            return true;
         }
 
         public PrototypeId GetStartTarget(Player player)
@@ -1876,16 +1939,6 @@ namespace MHServerEmu.Games.Regions
                 startTargetRef = pickLocation.Location.Target;
                 return true;
             }
-
-            return false;
-        }
-
-        public bool InOwnerParty(Player player)
-        {
-            ulong playerGuid = player.DatabaseUniqueId;
-            if (Settings.OwnerPlayerDbId == playerGuid) return true;    // FIXME: This doesn't look right
-
-            // TODO check owner is in party
 
             return false;
         }

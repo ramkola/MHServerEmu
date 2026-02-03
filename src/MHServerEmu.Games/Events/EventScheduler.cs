@@ -150,7 +150,7 @@ namespace MHServerEmu.Games.Events
         /// </summary>
         public void CancelEventsFiltered<T>(EventGroup eventGroup, in T filter) where T: struct, IScheduledEventFilter
         {
-            List<ScheduledEvent> filteredList = ListPool<ScheduledEvent>.Instance.Get();
+            using var filteredListHandle = ListPool<ScheduledEvent>.Instance.Get(out List<ScheduledEvent> filteredList);
 
             foreach (ScheduledEvent @event in eventGroup)
             {
@@ -160,8 +160,6 @@ namespace MHServerEmu.Games.Events
 
             foreach (ScheduledEvent @event in filteredList)
                 CancelEvent(@event);
-
-            ListPool<ScheduledEvent>.Instance.Return(filteredList);
         }
 
         /// <summary>
@@ -241,8 +239,6 @@ namespace MHServerEmu.Games.Events
             // Record metrics
             ulong gameId = Game.Current != null ? Game.Current.Id : 0;
             MetricsManager.Instance.RecordGamePerformanceMetric(gameId, GamePerformanceMetricEnum.ScheduledEventsPerUpdate, numEvents);
-            MetricsManager.Instance.RecordGamePerformanceMetric(gameId, GamePerformanceMetricEnum.EventSchedulerFramesPerUpdate, 1 + endFrame - startFrame);
-            MetricsManager.Instance.RecordGamePerformanceMetric(gameId, GamePerformanceMetricEnum.RemainingScheduledEvents, _eventPool.ActiveInstanceCount);
         }
 
         /// <summary>

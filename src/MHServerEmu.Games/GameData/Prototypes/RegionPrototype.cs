@@ -9,8 +9,8 @@ using MHServerEmu.Games.Loot;
 using MHServerEmu.Games.Properties.Evals;
 using MHServerEmu.Games.Regions;
 using MHServerEmu.Games.Regions.ObjectiveGraphs;
-using MHServerEmu.Games.Social;
 using MHServerEmu.Games.Social.Communities;
+using MHServerEmu.Games.Social.Parties;
 
 namespace MHServerEmu.Games.GameData.Prototypes
 {
@@ -56,11 +56,17 @@ namespace MHServerEmu.Games.GameData.Prototypes
     }
 
     [AssetEnum((int)None)]
+    [Flags]
     public enum RegionQueueMethod
     {
-        None = 0,
-        PvPQueue = 1,
-        DailyQueue = 5,
+        None                    = 0,
+        UsesRegionRequestQueue  = 1 << 0,
+        Method1                 = 1 << 1,   // This is never set because there was no option for it in Calligraphy.
+        QueueBypass             = 1 << 2,
+
+        // Calligraphy aliases
+        PvPQueue = UsesRegionRequestQueue,
+        DailyQueue = UsesRegionRequestQueue | QueueBypass,
     }
 
     [AssetEnum((int)BiDirectional)]
@@ -173,6 +179,16 @@ namespace MHServerEmu.Games.GameData.Prototypes
         public bool IsPublic { get => Behavior == RegionBehavior.Town || Behavior == RegionBehavior.PublicCombatZone || Behavior == RegionBehavior.MatchPlay; }
         [DoNotCopy]
         public bool IsPrivate { get => IsPublic == false; }
+        [DoNotCopy]
+        public bool IsQueueRegion { get => RegionQueueMethod.HasFlag(RegionQueueMethod.UsesRegionRequestQueue); }
+        [DoNotCopy]
+        public bool AllowsQueueBypass { get => RegionQueueMethod.HasFlag(RegionQueueMethod.QueueBypass); }
+        [DoNotCopy]
+        public int[] TeamLimits { get; private set; }
+        [DoNotCopy]
+        public int QueueGroupLimit { get; private set; }
+        [DoNotCopy]
+        public TimeSpan Lifetime { get; private set; }
 
         private Dictionary<AssetId, List<LootTableAssignmentPrototype>> _lootTableMap = new();
 
@@ -298,6 +314,78 @@ namespace MHServerEmu.Games.GameData.Prototypes
             }
 
             // ClientMapOverrides client only
+
+            Lifetime = TimeSpan.FromMinutes(LifetimeInMinutes);
+
+            TeamLimits = GetTeamLimits();
+            QueueGroupLimit = GetQueueGroupLimit();
+        }
+
+        private int[] GetTeamLimits()
+        {
+            List<int> teamLimits = null;
+
+            if (MetaGames.HasValue())
+            {
+                foreach (PrototypeId metaGameProtoRef in MetaGames)
+                {
+                    MetaGamePrototype metaGameProto = metaGameProtoRef.As<MetaGamePrototype>();
+                    if (metaGameProto == null)
+                    {
+                        Logger.Warn("FindMatchTeams(): metaGameProto == null");
+                        continue;
+                    }
+
+                    if (metaGameProto.Teams.IsNullOrEmpty())
+                        continue;
+
+                    foreach (PrototypeId teamProtoRef in metaGameProto.Teams)
+                    {
+                        MetaGameTeamPrototype teamProto = teamProtoRef.As<MetaGameTeamPrototype>();
+                        if (teamProto == null)
+                        {
+                            Logger.Warn("FindMatchTeams(): teamProto == null");
+                            continue;
+                        }
+
+                        teamLimits ??= new();
+                        teamLimits.Add(teamProto.MaxPlayers);
+                    }
+                }
+            }
+
+            return teamLimits?.ToArray();
+        }
+
+        private int GetQueueGroupLimit()
+        {
+            if (TeamLimits.HasValue())
+            {
+                int limit = 0;
+
+                foreach (int teamLimit in TeamLimits)
+                    limit = Math.Max(teamLimit, limit);
+
+                return limit;
+            }
+
+            switch (Behavior)
+            {
+                case RegionBehavior.Town:
+                case RegionBehavior.PublicCombatZone:
+                case RegionBehavior.MatchPlay:
+                    return PlayerLimit;
+
+                case RegionBehavior.PrivateStory:
+                case RegionBehavior.PrivateNonStory:
+                    return Math.Min(GameDatabase.GlobalsPrototype.PlayerPartyMaxSize, PlayerLimit);
+
+                case RegionBehavior.PrivateRaid:
+                    return Math.Min(GameDatabase.GlobalsPrototype.PlayerRaidMaxSize, PlayerLimit);
+
+                default:
+                    return 0;
+            }
         }
 
         public static PrototypeId ConstrainDifficulty(PrototypeId regionProtoRef, PrototypeId difficultyTierProtoRef)
@@ -400,7 +488,7 @@ namespace MHServerEmu.Games.GameData.Prototypes
 
             if (includeChildren)
             {
-                List<PrototypeId> parentRegions = ListPool<PrototypeId>.Instance.Get(regions);
+                using var parentRegionsHandle = ListPool<PrototypeId>.Instance.Get(regions, out List<PrototypeId> parentRegions);
                 foreach (var childRef in GameDatabase.DataDirectory.IteratePrototypesInHierarchy<RegionPrototype>(PrototypeIterateFlags.NoAbstractApprovedOnly))
                     foreach (var parentRef in parentRegions)
                         if (GameDatabase.DataDirectory.PrototypeIsAPrototype(childRef, parentRef))
@@ -408,14 +496,13 @@ namespace MHServerEmu.Games.GameData.Prototypes
                             regions.Add(childRef);
                             break;
                         }
-                ListPool<PrototypeId>.Instance.Return(parentRegions);
             }
 
             if (excludeRegions.HasValue())
                 foreach (var regionRef in excludeRegions)
                     regions.Remove(regionRef);
 
-            List<PrototypeId> altRegions = ListPool<PrototypeId>.Instance.Get(regions);
+            using var altRegionsHandle = ListPool<PrototypeId>.Instance.Get(regions, out List<PrototypeId> altRegions);
             foreach (var regionRef in altRegions)
             {
                 var regionProto = GameDatabase.GetPrototype<RegionPrototype>(regionRef);
@@ -423,7 +510,6 @@ namespace MHServerEmu.Games.GameData.Prototypes
                     foreach (var altRegionRef in regionProto.AltRegions)
                         regions.Add(altRegionRef);
             }
-            ListPool<PrototypeId>.Instance.Return(altRegions);
         }
 
         public static void GetAreasInGenerator(PrototypeId regionRef, HashSet<PrototypeId> areas)
@@ -434,10 +520,9 @@ namespace MHServerEmu.Games.GameData.Prototypes
 
             if (regionProto.AreasInGenerator == null)
             {
-                regionProto.AreasInGenerator = [];
-                HashSet<PrototypeId> regions = HashSetPool<PrototypeId>.Instance.Get();
+                regionProto.AreasInGenerator = new();
+                using var regionsHandle = HashSetPool<PrototypeId>.Instance.Get(out HashSet<PrototypeId> regions);
                 GetAreasInGenerator(regionProto, regionProto.AreasInGenerator, regions);
-                HashSetPool<PrototypeId>.Instance.Return(regions);
             }
 
             if (regionProto.AreasInGenerator != null)
@@ -618,7 +703,7 @@ namespace MHServerEmu.Games.GameData.Prototypes
             // Check party
             if (NoAccessOnFail == false)
             {
-                Party party = player.Party;
+                Party party = player.GetParty();
                 if (party != null)
                 {
                     CommunityMember communityMember = party.GetCommunityMemberForLeader(player);
@@ -645,6 +730,9 @@ namespace MHServerEmu.Games.GameData.Prototypes
 
         [DoNotCopy]
         public int Index { get; set; }
+
+        [DoNotCopy]
+        public bool CanQueue { get => StateParent != PrototypeId.Invalid || State == PrototypeId.Invalid; }
     }
 
     public class DividedStartLocationPrototype : Prototype

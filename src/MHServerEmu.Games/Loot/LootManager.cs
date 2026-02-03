@@ -67,7 +67,7 @@ namespace MHServerEmu.Games.Loot
             GiveLootFromSummary(lootResultSummary, inputSettings.Player);
         }
 
-        public void AwardLootFromTables(Span<(PrototypeId, LootActionType)> tables, LootInputSettings inputSettings, int recipientId)
+        public void AwardLootFromTables(List<(PrototypeId, LootActionType)> tables, LootInputSettings inputSettings, int recipientId)
         {
             // TODO: Combine loot summaries from multiple spawn / drop events
 
@@ -90,7 +90,7 @@ namespace MHServerEmu.Games.Loot
                 inputSettings.EventType >= LootDropEventType.OnKilled &&
                 inputSettings.EventType <= LootDropEventType.OnKilledMiniBoss)
             {
-                List<MissionLootTable> missionLootTableList = ListPool<MissionLootTable>.Instance.Get();
+                using var missionLootTableListHandle = ListPool<MissionLootTable>.Instance.Get(out List<MissionLootTable> missionLootTableList);
 
                 if (MissionManager.GetMissionLootTablesForEnemy(inputSettings.SourceEntity, inputSettings.Player, missionLootTableList))
                 {
@@ -103,8 +103,6 @@ namespace MHServerEmu.Games.Loot
                     // We are not using these settings anymore, but let's clear the mission prototype ref just in case something changes
                     inputSettings.MissionProtoRef = PrototypeId.Invalid;
                 }
-
-                ListPool<MissionLootTable>.Instance.Return(missionLootTableList);
             }
         }
 
@@ -270,17 +268,16 @@ namespace MHServerEmu.Games.Loot
             return true;
         }
 
-        public bool GiveLootFromSummary(LootResultSummary lootResultSummary, Player player, PrototypeId inventoryProtoRef = PrototypeId.Invalid, bool isMissionLoot = false)
+        public bool GiveLootFromSummary(LootResultSummary lootResultSummary, Player player,
+            PrototypeId inventoryProtoRef = PrototypeId.Invalid, PrototypeId missionProtoRef = PrototypeId.Invalid)
         {
             LootType lootTypes = lootResultSummary.Types;
 
             if (lootTypes == LootType.None)
                 return true;
 
-            bool success = true;
-
             // Use a list to process ItemSpec + item CurrencySpec loot together
-            List<Item> itemList = ListPool<Item>.Instance.Get();
+            using var itemListHandle = ListPool<Item>.Instance.Get(out List<Item> itemList);
 
             // Reusable property collection for applying extra properties
             using PropertyCollection properties = ObjectPoolManager.Instance.Get<PropertyCollection>();
@@ -312,8 +309,7 @@ namespace MHServerEmu.Games.Loot
                         foreach (Item itemToDestroy in itemList)
                             itemToDestroy.Destroy();
 
-                        success = false;
-                        goto end;
+                        return false;
                     }
 
                     item.Properties[PropertyEnum.InventoryStackCount] = itemSpec.StackCount;
@@ -350,8 +346,7 @@ namespace MHServerEmu.Games.Loot
                             foreach (Item itemToDestroy in itemList)
                                 itemToDestroy.Destroy();
 
-                            success = false;
-                            goto end;
+                            return false;
                         }
 
                         item.Properties[PropertyEnum.InventoryStackCount] = itemSpec.StackCount;
@@ -379,8 +374,7 @@ namespace MHServerEmu.Games.Loot
                     foreach (Item itemToDestroy in itemList)
                         itemToDestroy.Destroy();
 
-                    success = false;
-                    goto end;
+                    return false;
                 }
             }
 
@@ -415,46 +409,63 @@ namespace MHServerEmu.Games.Loot
                     player.AwardVendorXP(vendorXPSummary.XPAmount, vendorXPSummary.VendorProtoRef);
             }
 
-            // Mission-exclusive rewards: experience, endurance / health bonuses, power points
-            if (isMissionLoot)
+            // Mission-exclusive rewards: experience, property bonuses, "real money" (G)
+            const LootType MissionLootTypes = LootType.Experience | LootType.HealthBonus | LootType.EnduranceBonus | LootType.PowerPoints | LootType.RealMoney;
+
+            if (missionProtoRef != PrototypeId.Invalid)
             {
-                if (lootTypes.HasFlag(LootType.Experience))
+                Avatar avatar = player.CurrentAvatar;
+
+                if (avatar != null)
                 {
-                    Avatar avatar = player.CurrentAvatar;
-                    avatar?.AwardXP(lootResultSummary.Experience, 0, false);
+                    if (lootTypes.HasFlag(LootType.Experience))
+                        avatar.AwardXP(lootResultSummary.Experience, 0, false);
+
+                    if ((lootTypes & (LootType.HealthBonus | LootType.EnduranceBonus | LootType.PowerPoints)) != 0)
+                    {
+                        // Property rewards should always be for the first completion only.
+                        if (MissionManager.HasReceivedRewardsForMission(player, avatar, missionProtoRef) == false)
+                        {
+                            if (lootTypes.HasFlag(LootType.HealthBonus))
+                            {
+                                if (avatar.AdjustMissionRewardProperty(PropertyEnum.HealthAddBonus, lootResultSummary.HealthBonus, missionProtoRef) == false)
+                                    Logger.Warn($"GiveLootFromSummary(): Failed to give HealthBonus reward to avatar [{avatar}]");
+                            }
+
+                            if (lootTypes.HasFlag(LootType.EnduranceBonus))
+                            {
+                                foreach (PrimaryResourceManaBehaviorPrototype primaryManaBehaviorProto in avatar.GetPrimaryResourceManaBehaviors())
+                                {
+                                    ManaType manaType = primaryManaBehaviorProto.ManaType;
+                                    if (avatar.AdjustMissionRewardProperty(new(PropertyEnum.EnduranceAddBonus, manaType), (float)lootResultSummary.EnduranceBonus, missionProtoRef) == false)
+                                        Logger.Warn($"GiveLootFromSummary(): Failed to give EnduranceBonus reward for mana type {manaType} to avatar [{avatar}]");
+                                }
+                            }
+
+                            if (lootTypes.HasFlag(LootType.PowerPoints))
+                            {
+                                if (avatar.AdjustMissionRewardProperty(PropertyEnum.AvatarPowerPointsBonus, lootResultSummary.PowerPoints, missionProtoRef) == false)
+                                    Logger.Warn($"GiveLootFromSummary(): Failed to give PowerPoints reward to avatar [{avatar}]");
+                            }
+                        }
+                        else
+                        {
+                            Logger.Warn($"GiveLootFromSummary(): Avatar [{avatar}] rolled property mission reward for non-first mission completion");
+                        }
+                    }
                 }
 
-                if (lootTypes.HasFlag(LootType.HealthBonus))
-                {
-                    // TODO for 1.48
-                    Logger.Warn("GiveLootFromSummary(): HealthBonus rewards are not yet implemented");
-                }
-
-                if (lootTypes.HasFlag(LootType.EnduranceBonus))
-                {
-                    // TODO for 1.48
-                    Logger.Warn("GiveLootFromSummary(): EnduranceBonus rewards are not yet implemented");
-                }
-
-                if (lootTypes.HasFlag(LootType.PowerPoints))
-                {
-                    // TODO for 1.48
-                    Logger.Warn("GiveLootFromSummary(): PowerPoints rewards are not yet implemented");
-                }
+                // This is used for the HiddenOneTimeGiveGs mission
+                if (lootTypes.HasFlag(LootType.RealMoney))
+                    player.AcquireGazillionite(lootResultSummary.RealMoney);
             }
             else
             {
-                if ((lootTypes & (LootType.Experience | LootType.HealthBonus | LootType.EnduranceBonus | LootType.PowerPoints)) != 0)
-                {
+                if ((lootTypes & (MissionLootTypes)) != 0)
                     Logger.Warn($"GiveLootFromSummary(): Mission-only loot types found in a non-mission summary, Types=[{lootResultSummary.Types}]");
-                }
             }
 
-            // NOTE: We use goto here because returning a list to the pool while it's
-            // being iterated will clear it and cause it to be modified during iteration.
-            end:
-            ListPool<Item>.Instance.Return(itemList);
-            return success;
+            return true;
         }
 
         public bool SpawnItem(PrototypeId itemProtoRef, LootContext lootContext, Player player, WorldEntity sourceEntity)

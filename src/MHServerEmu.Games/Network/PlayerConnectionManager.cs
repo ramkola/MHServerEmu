@@ -97,13 +97,12 @@ namespace MHServerEmu.Games.Network
         public bool GetInterestedClients(List<PlayerConnection> interestedClientList, Entity entity,
             AOINetworkPolicyValues interestFilter = AOINetworkPolicyValues.AllChannels, bool skipOwner = false)
         {
-            List<Player> interestedPlayerList = ListPool<Player>.Instance.Get();
+            using var interestedPlayerListHandle = ListPool<Player>.Instance.Get(out List<Player> interestedPlayerList);
             GetInterestedPlayers(interestedPlayerList, entity, interestFilter, skipOwner);
 
             foreach (Player player in interestedPlayerList)
                 interestedClientList.Add(player.PlayerConnection);
 
-            ListPool<Player>.Instance.Return(interestedPlayerList);
             return interestedClientList.Count > 0;
         }
 
@@ -116,41 +115,13 @@ namespace MHServerEmu.Games.Network
         /// </summary>
         public bool GetInterestedClients(List<PlayerConnection> interestedClientList, Region region)
         {
-            List<Player> interestedPlayerList = ListPool<Player>.Instance.Get();
+            using var interestedPlayerListHandle = ListPool<Player>.Instance.Get(out List<Player> interestedPlayerList);
             GetInterestedPlayers(interestedPlayerList, region);
 
             foreach (Player player in interestedPlayerList)
                 interestedClientList.Add(player.PlayerConnection);
 
-            ListPool<Player>.Instance.Return(interestedPlayerList);
             return interestedClientList.Count > 0;
-        }
-
-        #endregion
-
-        #region Pending Processing
-
-        /// <summary>
-        /// Loads pending players.
-        /// </summary>
-        public void ProcessPendingPlayerConnections()
-        {
-            while (_pendingPlayerConnectionQueue.Count > 0)
-            {
-                PlayerConnection playerConnection = _pendingPlayerConnectionQueue.Dequeue();
-                playerConnection.EnterGame();
-            }
-        }
-
-        /// <summary>
-        /// Requests a player to be loaded.
-        /// </summary>
-        public void SetPlayerConnectionPending(PlayerConnection playerConnection)
-        {
-            // NOTE: We flush messages when we set the connection as pending so that
-            // we can deliver the loading screen message to the client ASAP.
-            playerConnection.FlushMessages();
-            _pendingPlayerConnectionQueue.Enqueue(playerConnection);
         }
 
         #endregion
@@ -171,13 +142,11 @@ namespace MHServerEmu.Games.Network
         /// </summary>
         public void SendMessageToInterested(IMessage message, Region region)
         {
-            List<PlayerConnection> interestedClientList = ListPool<PlayerConnection>.Instance.Get();
+            using var interestedClientListHandle = ListPool<PlayerConnection>.Instance.Get(out List<PlayerConnection> interestedClientList);
             GetInterestedClients(interestedClientList, region);
 
             foreach (PlayerConnection playerConnection in interestedClientList)
                 playerConnection.SendMessage(message);
-
-            ListPool<PlayerConnection>.Instance.Return(interestedClientList);
         }
 
         /// <summary>
@@ -185,13 +154,11 @@ namespace MHServerEmu.Games.Network
         /// </summary>
         public void SendMessageToInterested(IMessage message, Entity entity, AOINetworkPolicyValues interestFilter = AOINetworkPolicyValues.AllChannels, bool skipOwner = false)
         {
-            List<PlayerConnection> interestedClientList = ListPool<PlayerConnection>.Instance.Get();
+            using var interestedClientListHandle = ListPool<PlayerConnection>.Instance.Get(out List<PlayerConnection> interestedClientList);
             GetInterestedClients(interestedClientList, entity, interestFilter, skipOwner);
 
             foreach (PlayerConnection playerConnection in interestedClientList)
                 playerConnection.SendMessage(message);
-
-            ListPool<PlayerConnection>.Instance.Return(interestedClientList);
         }
 
         /// <summary>
@@ -245,9 +212,6 @@ namespace MHServerEmu.Games.Network
             if (RegisterNetClient(playerConnection) == false)
                 Logger.Error($"AcceptAndRegisterNewClient(): Failed to add client [{frontendClient}]");
 
-            // Notify the player manager
-            _game.GameManager.OnClientAdded(_game, frontendClient);
-
             // Send time sync straight away for the client to be able to initialize its EventScheduler (needed for loading screens).
             // This will also make the client start sending pings, so it needs to be done after we assign game id.
             SendMessageImmediate(playerConnection, NetMessageInitialTimeSync.CreateBuilder()
@@ -255,14 +219,15 @@ namespace MHServerEmu.Games.Network
                 .SetDateTimeServerSent(Clock.UnixTime.Ticks / 10)
                 .Build());
 
-            // Initializing a player connection sends the achievement database dump and a region availability query
+            // Initializing a player connection loads player data and sends the achievement database if needed
             if (playerConnection.Initialize() == false)
             {
                 playerConnection.Disconnect();
                 return false;
             }
 
-            // This connection will be set as pending when we receive region availability query response
+            // Notify the player manager. The player will be put into a region when we receive transfer params.
+            _game.GameManager.OnClientAdded(_game, frontendClient);
 
             Logger.Info($"Accepted and registered client [{frontendClient}] to game [{_game}]");
             return true;

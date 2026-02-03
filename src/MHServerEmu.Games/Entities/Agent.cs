@@ -683,30 +683,6 @@ namespace MHServerEmu.Games.Entities
             return true;
         }
 
-        protected override void InitializeProcEffectPowers()
-        {
-            base.InitializeProcEffectPowers();
-
-            // Initialize equipment procs
-            EntityManager entityManager = Game.EntityManager;
-
-            foreach (Inventory inventory in new InventoryIterator(this, InventoryIterationFlags.Equipment))
-            {
-                foreach (var entry in inventory)
-                {
-                    Item item = entityManager.GetEntity<Item>(entry.Id);
-                    if (item == null)
-                    {
-                        Logger.Warn("InitializeProcEffectPowers(): item == null");
-                        continue;
-                    }
-
-                    if (UpdateProcEffectPowers(item.Properties, true) == false)
-                        Logger.Warn($"InitializeProcEffectPowers(): UpdateProcEffectPowers failed when initializing item=[{item}] owner=[{this}]");
-                }
-            }
-        }
-
         protected override PowerUseResult ActivatePower(Power power, ref PowerActivationSettings settings)
         {
             PowerUseResult result = base.ActivatePower(power, ref settings);
@@ -801,15 +777,13 @@ namespace MHServerEmu.Games.Entities
                 return;
 
             // Need to use a temporary list here because activating a power can add a condition that will assign a proc power
-            List<Power> powerList = ListPool<Power>.Instance.Get();
+            using var powerListHandle = ListPool<Power>.Instance.Get(out List<Power> powerList);
 
             foreach (var kvp in PowerCollection)
                 powerList.Add(kvp.Value.Power);
 
             foreach (Power power in powerList)
                 TryAutoActivatePower(power);
-
-            ListPool<Power>.Instance.Return(powerList);
         }
 
         /// <summary>
@@ -1220,7 +1194,7 @@ namespace MHServerEmu.Games.Entities
             }
 
             // This is a boost to multiple powers
-            List<PowerProgressionInfo> powerInfoList = ListPool<PowerProgressionInfo>.Instance.Get();
+            using var powerInfoListHandle = ListPool<PowerProgressionInfo>.Instance.Get(out List<PowerProgressionInfo> powerInfoList);
             GetPowerProgressionInfos(powerInfoList);
 
             for (int i = 0; i < powerInfoList.Count; i++)
@@ -1267,7 +1241,6 @@ namespace MHServerEmu.Games.Entities
                 UpdatePowerRank(ref powerInfo, false);
             }
 
-            ListPool<PowerProgressionInfo>.Instance.Return(powerInfoList);
             return true;
         }
 
@@ -1294,7 +1267,7 @@ namespace MHServerEmu.Games.Entities
             }
 
             // This is a grant of multiple powers
-            List<PowerProgressionInfo> powerInfoList = ListPool<PowerProgressionInfo>.Instance.Get();
+            using var powerInfoListHandle = ListPool<PowerProgressionInfo>.Instance.Get(out List<PowerProgressionInfo> powerInfoList);
             GetPowerProgressionInfos(powerInfoList);
 
             for (int i = 0; i < powerInfoList.Count; i++)
@@ -1330,7 +1303,6 @@ namespace MHServerEmu.Games.Entities
                 DoPowerGrantUpdate(ref powerInfo);
             }
 
-            ListPool<PowerProgressionInfo>.Instance.Return(powerInfoList);
             return true;
         }
 
@@ -1432,7 +1404,7 @@ namespace MHServerEmu.Games.Entities
         {
             if (this is not Avatar && IsTeamUpAgent == false) return Logger.WarnReturn(false, "UpdatePowerProgressionPowers(): this is not Avatar && IsTeamUpAgent == false");
 
-            List<PowerProgressionInfo> powerInfoList = ListPool<PowerProgressionInfo>.Instance.Get();
+            using var powerInfoListHandle = ListPool<PowerProgressionInfo>.Instance.Get(out List<PowerProgressionInfo> powerInfoList);
             GetPowerProgressionInfos(powerInfoList);
 
             for (int i = 0; i < powerInfoList.Count; i++)
@@ -1449,7 +1421,6 @@ namespace MHServerEmu.Games.Entities
                 UpdatePowerRank(ref powerInfo, forceUnassign);
             }
 
-            ListPool<PowerProgressionInfo>.Instance.Return(powerInfoList);
             return true;
         }
 
@@ -1483,14 +1454,12 @@ namespace MHServerEmu.Games.Entities
                 UpdatePowerProgressionPowers(true);
 
             // Clean up previous respecs
-            List<PropertyId> removeList = ListPool<PropertyId>.Instance.Get();
+            using var removeListHandle = ListPool<PropertyId>.Instance.Get(out List<PropertyId> removeList);
             foreach (var kvp in Properties.IteratePropertyRange(PropertyEnum.PowersRespecResult, specIndex))
                 removeList.Add(kvp.Key);
 
             foreach (PropertyId propId in removeList)
                 Properties.RemoveProperty(propId);
-
-            ListPool<PropertyId>.Instance.Return(removeList);
 
             // Set the new respec
             if (powerProtoRef == PrototypeId.Invalid)
@@ -1551,6 +1520,8 @@ namespace MHServerEmu.Games.Entities
                 return true;
             }
 
+            Region?.EntityEnteredCombatEvent.Invoke(new(this));
+
             // Enter combat if not currently in combat
             ScheduleEntityEvent(_exitCombatEvent, inCombatTime);
 
@@ -1565,6 +1536,8 @@ namespace MHServerEmu.Games.Entities
         {
             if (Properties[PropertyEnum.IsInCombat] == false)
                 return Logger.WarnReturn(false, $"ExitCombat(): Agent [{this}] is not in combat");
+
+            Region?.EntityExitedCombatEvent.Invoke(new(this));
 
             if (_exitCombatEvent.IsValid)
                 Game.GameEventScheduler.CancelEvent(_exitCombatEvent);
@@ -1697,15 +1670,13 @@ namespace MHServerEmu.Games.Entities
 
         protected void SendLevelUpMessage()
         {
-            List<PlayerConnection> interestedClientList = ListPool<PlayerConnection>.Instance.Get();
+            using var interestedClientListHandle = ListPool<PlayerConnection>.Instance.Get(out List<PlayerConnection> interestedClientList);
             PlayerConnectionManager networkManager = Game.NetworkManager;
             if (networkManager.GetInterestedClients(interestedClientList, this, AOINetworkPolicyValues.AOIChannelOwner | AOINetworkPolicyValues.AOIChannelProximity))
             {
                 var levelUpMessage = NetMessageLevelUp.CreateBuilder().SetEntityID(Id).Build();
                 networkManager.SendMessageToMultiple(interestedClientList, levelUpMessage);
             }
-
-            ListPool<PlayerConnection>.Instance.Return(interestedClientList);
         }
 
         protected override void SetCharacterLevel(int characterLevel)
@@ -2119,7 +2090,20 @@ namespace MHServerEmu.Games.Entities
                     {
                         Property.FromParam(id, 0, out PrototypeId enemyBoost);
                         if (enemyBoost == PrototypeId.Invalid) break;
-                        if (newValue) AssignEnemyBoostActivePower(enemyBoost);
+
+                        if (newValue)
+                        {
+                            AssignEnemyBoostActivePower(enemyBoost);
+                        }
+                        else
+                        {
+                            var popGlobals = GameDatabase.PopulationGlobalsPrototype;
+                            if (enemyBoost == popGlobals.TwinEnemyBoost)
+                            {
+                                var condition = ConditionCollection.GetConditionByRef(popGlobals.TwinEnemyCondition);
+                                if (condition != null) ConditionCollection.RemoveCondition(condition.Id);
+                            }
+                        }
                     }
 
                     break;
@@ -2338,8 +2322,8 @@ namespace MHServerEmu.Games.Entities
 
         public override void OnGotHit(WorldEntity attacker)
         {
-            base.OnGotHit(attacker);
             AIController?.OnAIOnGotHit(attacker);
+            base.OnGotHit(attacker);
         }
 
         public override void OnDramaticEntranceEnd()
@@ -2537,7 +2521,7 @@ namespace MHServerEmu.Games.Entities
             ConditionPrototype ccReactConditionProto = ccReactConditionProtoRef.As<ConditionPrototype>();
             if (ccReactConditionProto == null) return Logger.WarnReturn(false, "OnNegativeStatusEffectApplied(): ccReactConditionProto == null");
 
-            List<PrototypeId> negativeStatusList = ListPool<PrototypeId>.Instance.Get();
+            using var negativeStatusListHandle = ListPool<PrototypeId>.Instance.Get(out List<PrototypeId> negativeStatusList);
             if (negativeStatusCondition.IsANegativeStatusEffect(negativeStatusList))
             {
                 // Apply only when this negative status condition has movement / cast speed decreases and no other statuses
@@ -2559,7 +2543,6 @@ namespace MHServerEmu.Games.Entities
                 Logger.Warn("OnNegativeStatusEffectApplied(): condition.IsANegativeStatusEffect(negativeStatusList) == false");
             }
 
-            ListPool<PrototypeId>.Instance.Return(negativeStatusList);
             return true;
         }
 
@@ -2886,14 +2869,15 @@ namespace MHServerEmu.Games.Entities
         {
             if (Properties[PropertyEnum.AIMasterAvatarDbGuid] != avatar.DatabaseUniqueId) return;
 
-            SetDormant(false);
-
             Properties[PropertyEnum.NoLootDrop] = true;
             Properties[PropertyEnum.NoExpOnDeath] = true;
             Properties[PropertyEnum.AIIgnoreNoTgtOverrideProfile] = true;
             Properties[PropertyEnum.DramaticEntrancePlayedOnce] = true;
             Properties[PropertyEnum.PetHealthPctBonus] = avatar.Properties[PropertyEnum.HealthPctBonus];
             Properties[PropertyEnum.PetDamagePctBonus] = avatar.Properties[PropertyEnum.DamagePctBonus];
+
+            // IMPORTANT: Dormant needs to be turned off after setting DramaticEntrancePlayedOnce.
+            SetDormant(false);
 
             AIController?.Blackboard.PropertyCollection.RemoveProperty(PropertyEnum.AIFullOverride);
             Properties.RemoveProperty(PropertyEnum.MissionPrototype);
@@ -2909,7 +2893,7 @@ namespace MHServerEmu.Games.Entities
 
             SetSummonedAllianceOverride(avatar.Alliance);
 
-            List<PrototypeId> boostList = ListPool<PrototypeId>.Instance.Get();
+            using var boostListHandle = ListPool<PrototypeId>.Instance.Get(out List<PrototypeId> boostList);
 
             foreach (var kvp in Properties.IteratePropertyRange(PropertyEnum.EnemyBoost))
             {
@@ -2924,8 +2908,6 @@ namespace MHServerEmu.Games.Entities
 
             foreach (var boostRef in boostList)
                 Properties.RemoveProperty(new PropertyId(PropertyEnum.EnemyBoost, boostRef));
-
-            ListPool<PrototypeId>.Instance.Return(boostList);
         }
 
         public void SetSummonedAllianceOverride(AlliancePrototype alliance)
@@ -2939,7 +2921,7 @@ namespace MHServerEmu.Games.Entities
 
         public void KillSummonedOnOwnerDeath()
         {
-            List<WorldEntity> summons = ListPool<WorldEntity>.Instance.Get();
+            using var summonsHandle = ListPool<WorldEntity>.Instance.Get(out List<WorldEntity> summons);
 
             foreach (var summoned in new SummonedEntityIterator(this))
             {
@@ -2955,8 +2937,6 @@ namespace MHServerEmu.Games.Entities
 
             foreach (var summoned in summons)
                 SummonPower.KillSummoned(summoned, this);
-
-            ListPool<WorldEntity>.Instance.Return(summons);
         }
 
         public override bool IsSummonedPet()
@@ -3094,18 +3074,17 @@ namespace MHServerEmu.Games.Entities
 
             if (action.Rewards.HasValue())
             {
-                List<Player> playerList = ListPool<Player>.Instance.Get();
+                using var playerListHandle = ListPool<Player>.Instance.Get(out List<Player> playerList);
                 Power.ComputeNearbyPlayers(Region, RegionLocation.Position, 0, false, playerList);
 
-                Span<(PrototypeId, LootActionType)> tables = stackalloc (PrototypeId, LootActionType)[action.Rewards.Length];
-
-                int numTables = 0;
+                using var tablesHandle = ListPool<(PrototypeId, LootActionType)>.Instance.Get(out List<(PrototypeId, LootActionType)> tables);
                 foreach (var lootTableProtoRef in action.Rewards)
                 {
-                    if (lootTableProtoRef == PrototypeId.Invalid) continue;
-                    tables[numTables++] = (lootTableProtoRef, LootActionType.Spawn);
+                    if (lootTableProtoRef == PrototypeId.Invalid)
+                        continue;
+
+                    tables.Add((lootTableProtoRef, LootActionType.Spawn));
                 }
-                tables = tables[..numTables];
 
                 int recipientId = 1;
                 foreach (Player player in playerList)
@@ -3114,8 +3093,6 @@ namespace MHServerEmu.Games.Entities
                     inputSettings.Initialize(LootContext.Drop, player, this, CharacterLevel);
                     Game.LootManager.AwardLootFromTables(tables, inputSettings, recipientId++);
                 }
-
-                ListPool<Player>.Instance.Return(playerList);
             }
 
             if (action.BroadcastEvent != PrototypeId.Invalid)
@@ -3128,7 +3105,7 @@ namespace MHServerEmu.Games.Entities
                         return false;
 
                     var volume = new Sphere(RegionLocation.Position, broadcastEventProto.BroadcastRange);
-                    foreach (var entity in region.IterateEntitiesInVolume(volume, new(EntityRegionSPContextFlags.ActivePartition)))
+                    foreach (var entity in region.IterateEntitiesInVolume(volume, new(EntityRegionSPContextFlags.PrimaryPartition)))
                         entity.TriggerEntityActionEvent(broadcastEventProto.EventToBroadcast);
                 }
             }
@@ -3138,10 +3115,12 @@ namespace MHServerEmu.Games.Entities
 
         public void DrawPath(EntityHelper.TestOrb orbRef)
         {
+#if DEBUG
             if (EntityHelper.DebugOrb == false) return;
             if (Locomotor.HasPath)
                 foreach(var node in Locomotor.LocomotionState.PathNodes)
-                    EntityHelper.CrateOrb(orbRef, node.Vertex, Region);
+                    EntityHelper.CreateOrb(orbRef, node.Vertex, Region);
+#endif
         }
 
         public void StartHitReactionCooldown()

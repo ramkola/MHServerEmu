@@ -3,10 +3,12 @@ using Gazillion;
 using Google.ProtocolBuffers;
 using MHServerEmu.Core.Collections;
 using MHServerEmu.Core.Collisions;
+using MHServerEmu.Core.Config;
 using MHServerEmu.Core.Extensions;
 using MHServerEmu.Core.Helpers;
 using MHServerEmu.Core.Logging;
 using MHServerEmu.Core.Memory;
+using MHServerEmu.Core.Network;
 using MHServerEmu.Core.Serialization;
 using MHServerEmu.Core.System.Time;
 using MHServerEmu.Core.VectorMath;
@@ -29,6 +31,7 @@ using MHServerEmu.Games.Leaderboards;
 using MHServerEmu.Games.Loot;
 using MHServerEmu.Games.MetaGames;
 using MHServerEmu.Games.Missions;
+using MHServerEmu.Games.MTXStore;
 using MHServerEmu.Games.Navi;
 using MHServerEmu.Games.Network;
 using MHServerEmu.Games.Populations;
@@ -40,6 +43,7 @@ using MHServerEmu.Games.Regions.Maps;
 using MHServerEmu.Games.Regions.MatchQueues;
 using MHServerEmu.Games.Social.Communities;
 using MHServerEmu.Games.Social.Guilds;
+using MHServerEmu.Games.Social.Parties;
 
 namespace MHServerEmu.Games.Entities
 {
@@ -86,13 +90,18 @@ namespace MHServerEmu.Games.Entities
         private readonly EventPointer<CheckHoursPlayedEvent> _checkHoursPlayedEvent = new();
         private readonly EventPointer<ScheduledHUDTutorialResetEvent> _hudTutorialResetEvent = new();
         private readonly EventPointer<CommunityBroadcastEvent> _communityBroadcastEvent = new();
+        private readonly EventPointer<CommunityPartyCircleChangedEvent> _communityPartyCircleChangedEvent = new();
+        private readonly EventPointer<WorldViewUpdateEvent> _worldViewUpdateEvent = new();
+        private readonly EventPointer<TeleportToPartyMemberEvent> _teleportToPartyMemberEvent = new();
         private readonly EventGroup _pendingEvents = new();
+
+        private readonly PropertyCollection _permaBuffProperties = new();
 
         private ReplicatedPropertyCollection _avatarProperties = new();
         private ulong _shardId;     // This was probably used for database sharding, we don't need this
-        private RepString _playerName = new();
+        private RepVar_string _playerName = new();
         private ulong[] _consoleAccountIds = new ulong[(int)PlayerAvatarIndex.Count];
-        private RepString _secondaryPlayerName = new();
+        private RepVar_string _secondaryPlayerName = new();
 
         // NOTE: EmailVerified and AccountCreationTimestamp are set in NetMessageGiftingRestrictionsUpdate that
         // should be sent in the packet right after logging in. NetMessageGetCurrencyBalanceResponse should be
@@ -100,11 +109,11 @@ namespace MHServerEmu.Games.Entities
         private bool _emailVerified;
         private TimeSpan _accountCreationTimestamp;     // UnixTime
 
-        private RepULong _partyId = new();
+        private RepVar_ulong _partyId = new();
 
-        private ulong _guildId;
-        private string _guildName;
-        private GuildMembership _guildMembership;
+        private ulong _guildId = GuildManager.InvalidGuildId;
+        private string _guildName = string.Empty;
+        private GuildMembership _guildMembership = GuildMembership.eGMNone;
 
         private Community _community;
         private List<PrototypeId> _unlockedInventoryList = new();
@@ -126,8 +135,8 @@ namespace MHServerEmu.Games.Entities
         public ArchiveVersion LastSerializedArchiveVersion { get; private set; } = ArchiveVersion.Current;    // Updated on serialization
 
         public MissionManager MissionManager { get; private set; }
+        public PropertyCollection AvatarProperties { get => _avatarProperties; }
         public MatchQueueStatus MatchQueueStatus { get; private set; } = new();
-        public override ulong PartyId { get => _partyId.Get(); }
         public Community Community { get => _community; }
         public GameplayOptions GameplayOptions { get; private set; } = new();
         public AchievementState AchievementState { get; private set; } = new();
@@ -153,11 +162,9 @@ namespace MHServerEmu.Games.Entities
         public bool IsConsoleUI { get => false; }
         public bool IsUsingUnifiedStash { get => IsConsolePlayer || IsConsoleUI; }
 
-        public bool IsInParty { get; internal set; }
         public Avatar PrimaryAvatar { get => CurrentAvatar; } // Fix for PC
         public Avatar SecondaryAvatar { get; private set; }
         public int CurrentAvatarCharacterLevel { get => PrimaryAvatar?.CharacterLevel ?? 0; }
-        public GuildMembership GuildMembership { get; internal set; }
         public PrototypeId ActiveChapter { get => Properties[PropertyEnum.ActiveMissionChapter]; }
         public PrototypeId Faction { get => Properties[PropertyEnum.Faction]; }
         public ulong DialogTargetId { get; private set; }
@@ -169,8 +176,20 @@ namespace MHServerEmu.Games.Entities
         public int PowerSpecIndexUnlocked { get => Properties[PropertyEnum.PowerSpecIndexUnlocked]; }
         public ulong TeamUpSynergyConditionId { get; set; }
 
-        public static bool IsPlayerTradeEnabled { get; internal set; }
+        public override ulong PartyId { get => _partyId.Get(); }
+        public bool IsInParty { get => PartyId != 0; }
+        public List<PrototypeId> PartyFilters { get; } = new();
+
+        public ulong GuildId { get => _guildId; }
+        public string GuildName { get => _guildName; }
+        public GuildMembership GuildMembership { get => _guildMembership; }
+        public bool IsInGuild { get => _guildId != GuildManager.InvalidGuildId; }
+
         public PlayerTradeStatusCode PlayerTradeStatusCode { get; private set; } = PlayerTradeStatusCode.ePTSC_None;
+        public string PlayerTradePartnerName { get; private set; } = string.Empty;
+        public bool PlayerTradeConfirmFlag { get; private set; }
+        public bool PlayerTradePartnerConfirmFlag { get; private set; }
+        public uint PlayerTradeSequenceNumber { get; private set; }
 
         public Player(Game game) : base(game)
         {
@@ -195,6 +214,9 @@ namespace MHServerEmu.Games.Entities
 
             Game.EntityManager.AddPlayer(this);
             MatchQueueStatus.SetOwner(this);
+
+            // Perma buff properties are attached as child to avatar properties because avatar properties are persistent, while perma buffs are not.
+            _avatarProperties.AddChildCollection(_permaBuffProperties);
 
             _community = new(this);
             _community.Initialize();
@@ -271,6 +293,22 @@ namespace MHServerEmu.Games.Entities
 
                     break;
                 }
+
+                case PropertyEnum.RunestonesAmount:
+                {
+                    var region = GetRegion();
+                    if (region == null || region.MetaGames.Count == 0) break;
+                    var manager = Game.EntityManager;
+
+                    foreach (var metagameId in region.MetaGames)
+                    {
+                        var pvp = manager.GetEntity<PvP>(metagameId);
+                        if (pvp == null) continue;
+                        pvp.UpdateRunestonesScore(this, newValue);
+                    }
+
+                    break;
+                }
             }
         }
 
@@ -298,7 +336,7 @@ namespace MHServerEmu.Games.Entities
             // Restore persistent cooldowns
             if (archive.IsPersistent)
             {
-                Dictionary<PropertyId, PropertyValue> setDict = DictionaryPool<PropertyId, PropertyValue>.Instance.Get();
+                using var setDictHandle = DictionaryPool<PropertyId, PropertyValue>.Instance.Get(out Dictionary<PropertyId, PropertyValue> setDict);
 
                 foreach (var kvp in Properties.IteratePropertyRange(PropertyEnum.PowerCooldownDurationPersistent))
                 {
@@ -336,8 +374,6 @@ namespace MHServerEmu.Games.Entities
 
                 foreach (var kvp in setDict)
                     Properties[kvp.Key] = kvp.Value;
-
-                DictionaryPool<PropertyId, PropertyValue>.Instance.Return(setDict);
             }
         }
 
@@ -392,7 +428,7 @@ namespace MHServerEmu.Games.Entities
                 }
             }
 
-            bool hasCommunityData = /* archive.IsPersistent || */ archive.IsMigration ||    // REMOVEME/TODO: Persistent communities
+            bool hasCommunityData = archive.IsPersistent || archive.IsMigration ||
                 (archive.IsReplication && archive.HasReplicationPolicy(AOINetworkPolicyValues.AOIChannelOwner));
             success &= Serializer.Transfer(archive, ref hasCommunityData);
             if (hasCommunityData)
@@ -478,11 +514,17 @@ namespace MHServerEmu.Games.Entities
             // Enter game to become added to the AOI
             base.EnterGame(settings);
 
+            InitPermaBuffs();
+
             OnEnterGameInitStashTabOptions();
+
+            ClearPlayerTradeInventory();
 
             InitializeVendors();
             ScheduleCheckHoursPlayedEvent();
             UpdateUISystemLocks();
+
+            Game.GuildManager.OnPlayerEnteringGame(this);
         }
 
         public override void ExitGame()
@@ -497,13 +539,21 @@ namespace MHServerEmu.Games.Entities
 
         public override void Destroy()
         {
+            Game.GuildManager.OnPlayerLeavingGame(this);
+
             var region = GetRegion();
             if (region != null)
                 MissionManager.Shutdown(region);
 
+            // We need to remove references to this player entity from other party members before we destroy it
+            // to avoid triggering validation. TODO: Find a better solution for this.
+            UpdatePartyAOI(GetParty());
+
             LeaderboardManager.Destroy();
 
             base.Destroy();
+
+            Game.PartyManager.OnPlayerDestroyed(this);
         }
 
         public override void OnDeallocate()
@@ -577,6 +627,66 @@ namespace MHServerEmu.Games.Entities
             return AOI.Region;
         }
 
+        public bool CanEnterRegion(PrototypeId regionProtoRef, PrototypeId difficultyTierProtoRef, bool isPartyTeleport)
+        {
+            RegionPrototype regionProto = regionProtoRef.As<RegionPrototype>();
+            if (regionProto == null) return Logger.WarnReturn(false, "CanEnterRegion(): regionProto == null");
+
+            Avatar avatar = CurrentAvatar;
+            if (avatar == null) return Logger.WarnReturn(false, "CanEnterRegion(): avatar == null");
+
+            if (regionProto.HasPvPMetaGame)
+            {
+                // Do not allow teleports to PvP regions when PvP is disabled
+                if (LiveTuningManager.GetLiveGlobalTuningVar(GlobalTuningVar.eGTV_PVPEnabled) == 0f)
+                {
+                    SendBannerMessage(GameDatabase.UIGlobalsPrototype.MessagePvPDisabledPortalFail);
+                    return false;
+                }
+
+                // Do not allow party teleports to PvP regions
+                if (isPartyTeleport)
+                {
+                    SendBannerMessage(GameDatabase.UIGlobalsPrototype.MessagePartyPvPPortalFail);
+                    return false;
+                }
+            }
+
+            if (regionProto.RunEvalAccessRestriction(this, avatar, difficultyTierProtoRef) == false)
+            {
+                SendBannerMessage(GameDatabase.UIGlobalsPrototype.MessageRegionRestricted);
+                return false;
+            }
+
+            Party party = GetParty();
+            if (party != null && party.Type == GroupType.GroupType_Raid)
+            {
+                switch (regionProto.Behavior)
+                {
+                    case RegionBehavior.PrivateStory:
+                    case RegionBehavior.PrivateNonStory:
+                        SendBannerMessage(GameDatabase.UIGlobalsPrototype.MessagePrivateDisallowedInRaid);
+                        return false;
+
+                    case RegionBehavior.MatchPlay:
+                        if (regionProto.AllowRaids() == false)
+                        {
+                            SendBannerMessage(GameDatabase.UIGlobalsPrototype.MessageQueueNotAvailableInRaid);
+                            return false;
+                        }
+                        break;
+                }
+            }
+
+            if (LiveTuningManager.GetLiveRegionTuningVar(regionProto, RegionTuningVar.eRTV_Enabled) == 0f)
+            {
+                SendBannerMessage(GameDatabase.UIGlobalsPrototype.MessageRegionDisabledPortalFail);
+                return false;
+            }
+
+            return true;
+        }
+
         public void UpdateSpawnMap(Vector3 position)
         {
             var region = GetRegion();
@@ -592,11 +702,6 @@ namespace MHServerEmu.Games.Entities
             foreach (var area in region.IterateAreas(volume))
                 if (area.SpawnMap != null)
                     area.PopulationArea?.UpdateSpawnMap(position);
-        }
-
-        public bool ViewedRegion(ulong regionId)
-        {
-            return PlayerConnection.WorldView.ContainsRegionInstanceId(regionId);
         }
 
         public MetaGameTeam GetPvPTeam()
@@ -618,6 +723,27 @@ namespace MHServerEmu.Games.Entities
             }
 
             return null;
+        }
+
+        public bool IsRegionInWorldView(ulong regionId)
+        {
+            return PlayerConnection.WorldView.ContainsRegion(regionId);
+        }
+
+        public void ScheduleWorldViewUpdate()
+        {
+            if (_worldViewUpdateEvent.IsValid)
+                return;
+
+            ScheduleEntityEvent(_worldViewUpdateEvent, TimeSpan.Zero);
+        }
+
+        private void OnWorldViewUpdate()
+        {
+            // Remove bodyslide return parameters if the region is no longer available
+            ulong bodySliderRegionId = Properties[PropertyEnum.BodySliderRegionId];
+            if (bodySliderRegionId != 0 && IsRegionInWorldView(bodySliderRegionId) == false)
+                RemoveBodysliderProperties();
         }
 
         #endregion
@@ -946,7 +1072,7 @@ namespace MHServerEmu.Games.Entities
             // Update vendor inventories if we are adding a recipe
             if (invLoc.InventoryConvenienceLabel == InventoryConvenienceLabel.CraftingRecipesLearned)
             {
-                List<VendorTypePrototype> vendorsToUpdate = ListPool<VendorTypePrototype>.Instance.Get();
+                using var vendorsToUpdateHandle = ListPool<VendorTypePrototype>.Instance.Get(out List<VendorTypePrototype> vendorsToUpdate);
 
                 foreach (var kvp in Properties.IteratePropertyRange(PropertyEnum.VendorLevel))
                 {
@@ -966,8 +1092,6 @@ namespace MHServerEmu.Games.Entities
 
                 foreach (VendorTypePrototype vendorTypeProto in vendorsToUpdate)
                     RollVendorInventory(vendorTypeProto, false);
-
-                ListPool<VendorTypePrototype>.Instance.Return(vendorsToUpdate);
             }
 
             // Adjust available ingredients for auto populated inputs
@@ -1346,6 +1470,31 @@ namespace MHServerEmu.Games.Entities
             return true;
         }
 
+        /// <summary>
+        /// Converts the specified number of Eternity Splinters (ES) to Gazillionite (G). Returns the amount of Gazillionite acquired.
+        /// </summary>
+        public int ConvertEternitySplintersToGazillionite(int esAmount)
+        {
+            PropertyId esPropId = new(PropertyEnum.Currency, GameDatabase.CurrencyGlobalsPrototype.EternitySplinters);
+
+            long esBalance = Properties[esPropId];
+            if (esBalance < esAmount)
+                return 0;
+
+            var config = ConfigManager.Instance.GetConfig<MTXStoreConfig>();
+            int gAmount = Math.Max((int)(esAmount * config.ESToGazillioniteConversionRatio), 0);
+            if (gAmount == 0)
+                return 0;
+
+            if (AcquireGazillionite(gAmount) == false)
+                return 0;
+
+            Properties[esPropId] = esBalance - esAmount;
+
+            Logger.Info($"[{PlayerConnection}] converted {esAmount} ES to {gAmount} G", LogCategory.MTXStore);            
+            return gAmount;
+        }
+
         public bool AwardBonusItemFindPoints(int amount, LootInputSettings settings)
         {
             if (amount <= 0)
@@ -1527,7 +1676,7 @@ namespace MHServerEmu.Games.Entities
         /// </summary>
         private void OnEnterGameInitStashTabOptions()
         {
-            List<PrototypeId> stashInvRefs = ListPool<PrototypeId>.Instance.Get();
+            using var stashInvRefsHandle = ListPool<PrototypeId>.Instance.Get(out List<PrototypeId> stashInvRefs);
             if (GetStashInventoryProtoRefs(stashInvRefs, false, true))
             {
                 foreach (PrototypeId stashRef in stashInvRefs)
@@ -1538,10 +1687,8 @@ namespace MHServerEmu.Games.Entities
             }
             else
             {
-                Logger.Warn("OnEnterGameInitStashTabOptions()(): GetStashInventoryProtoRefs(stashInvRefs, false, true) == false");
+                Logger.Warn("OnEnterGameInitStashTabOptions(): GetStashInventoryProtoRefs(stashInvRefs, false, true) == false");
             }
-
-            ListPool<PrototypeId>.Instance.Return(stashInvRefs);
         }
 
         #endregion
@@ -1806,7 +1953,11 @@ namespace MHServerEmu.Games.Entities
 
             IsSwitchingAvatar = false;
 
-            // Remove bodyslider properties for regions that are supposed to be limited to individual avatars
+            // Unreserve private story regions so that the avatar we switched to can do the story without fiddling with region instances.
+            ServiceMessage.ClearPrivateStoryRegions clearPrivateStoryRegions = new(DatabaseUniqueId);
+            ServerManager.Instance.SendMessageToService(GameServiceType.PlayerManager, clearPrivateStoryRegions);
+
+            // Remove bodyslider properties if they are for a private story region, which should no longer be accessible.
             if (HasBodysliderProperties())
             {
                 PrototypeId bodysliderRegionProtoRef = Properties[PropertyEnum.BodySliderRegionRef];
@@ -1949,12 +2100,44 @@ namespace MHServerEmu.Games.Entities
 
         public void OnChangeActiveAvatar(int avatarIndex, ulong lastCurrentAvatarId)
         {
-            // TODO: Apply and remove avatar properties stored in the player
+            if (lastCurrentAvatarId != InvalidId)
+            {
+                Avatar lastCurrentAvatar = Game.EntityManager.GetEntity<Avatar>(lastCurrentAvatarId);
+                if (lastCurrentAvatar != null)
+                {
+                    PropertyCollection lastAvatarProperties = lastCurrentAvatar.Properties;
+                    if (_avatarProperties.IsChildOf(lastAvatarProperties))
+                        _avatarProperties.RemoveFromParent(lastAvatarProperties);
+                }
+            }
+
+            Avatar avatar = GetActiveAvatarByIndex(avatarIndex);
+            avatar?.Properties.AddChildCollection(_avatarProperties);
 
             SendMessage(NetMessageCurrentAvatarChanged.CreateBuilder()
                 .SetAvatarIndex(avatarIndex)
                 .SetLastCurrentEntityId(lastCurrentAvatarId)
                 .Build());
+
+            UpdateAvatarAlliance();
+        }
+
+        private void UpdateAvatarAlliance()
+        {
+            var avatar = CurrentAvatar;
+            if (avatar == null) return;
+
+            avatar.Properties[PropertyEnum.AllianceOverride] = AvatarProperties[PropertyEnum.AllianceOverride];
+        }
+
+        public void SetAllianceOverride(AlliancePrototype allianceProto)
+        {
+            if (allianceProto == null)
+                AvatarProperties.RemoveProperty(PropertyEnum.AllianceOverride);
+            else
+                AvatarProperties[PropertyEnum.AllianceOverride] = allianceProto.DataRef;
+
+            UpdateAvatarAlliance();
         }
 
         public void OnAvatarCharacterLevelChanged(Avatar avatar)
@@ -2006,6 +2189,38 @@ namespace MHServerEmu.Games.Entities
         public bool HasAvatarAsCappedStarter(Avatar avatar)
         {
             return HasAvatarAsStarter(avatar.PrototypeDataRef) && avatar.CharacterLevel >= Avatar.GetStarterAvatarLevelCap();
+        }
+
+        public bool OwnsItem(PrototypeId itemProtoRef)
+        {
+            if (itemProtoRef == PrototypeId.Invalid) return Logger.WarnReturn(false, "OwnsItem(): itemProtoRef == PrototypeId.Invalid");
+
+            // Avatar unlocks
+            AvatarPrototype avatarProto = itemProtoRef.As<AvatarPrototype>();
+            if (avatarProto != null)
+                return HasAvatarFullyUnlocked(itemProtoRef);
+
+            // Avatar equipment
+            foreach (Avatar avatar in new AvatarIterator(this))
+            {
+                if (InventoryIterator.ContainsMatchingEntity(avatar, itemProtoRef))
+                    return true;
+            }
+
+            // Player inventories
+            foreach (Inventory inventory in new InventoryIterator(this))
+            {
+                if (inventory.Category == InventoryCategory.PlayerAvatars)
+                    continue;
+
+                if (inventory.Category == InventoryCategory.PlayerVendor)
+                    continue;
+
+                if (inventory.ContainsMatchingEntity(itemProtoRef))
+                    return true;
+            }
+
+            return false;
         }
 
         public bool UnlockPowerSpecIndex(int index)
@@ -2383,7 +2598,9 @@ namespace MHServerEmu.Games.Entities
 
         public PrototypeId GetDifficultyTierPreference()
         {
-            // TODO: Party
+            Party party = GetParty();
+            if (party != null)
+                return party.DifficultyTierProtoRef;
 
             if (CurrentAvatar != null)
                 return CurrentAvatar.Properties[PropertyEnum.DifficultyTierPreference];
@@ -2404,6 +2621,37 @@ namespace MHServerEmu.Games.Entities
                 return difficultyTierProtoRef;
 
             return PrototypeId.Invalid;
+        }
+
+        public void SendDifficultyTierPreferenceToPlayerManager()
+        {
+            PrototypeId difficultyTierProtoRef = CurrentAvatar != null
+                ? CurrentAvatar.Properties[PropertyEnum.DifficultyTierPreference]
+                : GameDatabase.GlobalsPrototype.DifficultyTierDefault;
+
+            ServiceMessage.SetDifficultyTierPreference message = new(DatabaseUniqueId, (ulong)difficultyTierProtoRef);
+            ServerManager.Instance.SendMessageToService(GameServiceType.PlayerManager, message);
+        }
+
+        public void UpdatePartyDifficulty(PrototypeId difficultyTierProtoRef)
+        {
+            Party party = GetParty();
+            if (party == null)
+                return;
+
+            // Only the leader can update difficulty.
+            if (party.IsLeader(this) == false)
+                return;
+
+            PartyOperationPayload request = PartyOperationPayload.CreateBuilder()
+                .SetRequestingPlayerDbId(DatabaseUniqueId)
+                .SetRequestingPlayerName(GetName())
+                .SetOperation(GroupingOperationType.eGOP_ChangeDifficulty)
+                .SetDifficultyTierProtoId((ulong)difficultyTierProtoRef)
+                .Build();
+
+            ServiceMessage.PartyOperationRequest message = new(request);
+            ServerManager.Instance.SendMessageToService(GameServiceType.PlayerManager, message);
         }
 
         #endregion
@@ -2518,13 +2766,6 @@ namespace MHServerEmu.Games.Entities
                 Properties.RemoveProperty(prop);
         }
 
-        public void SendRegionTransferFailure(RegionTransferFailure reason)
-        {
-            SendMessage(NetMessageUnableToChangeRegion.CreateBuilder()
-                .SetChangeFailed(ChangeRegionFailed.CreateBuilder().SetReason(reason))
-                .Build());
-        }
-
         public void OnCellLoaded(uint cellId, ulong regionId)
         {
             AOI.OnCellLoaded(cellId, regionId);
@@ -2544,6 +2785,127 @@ namespace MHServerEmu.Games.Entities
             _teleportData.Clear();
             DequeueLoadingScreen();
             TryPlayKismetSequences();
+
+            return true;
+        }
+
+        #endregion
+
+        #region Match Queue
+
+        public bool UpdateMatchQueue(ulong playerGuid, PrototypeId regionRef, PrototypeId difficultyTierRef, int playersInQueue,
+            ulong groupId, RegionRequestQueueUpdateVar status, string playerName)
+        {
+            RegionPrototype regionProto = regionRef.As<RegionPrototype>();
+            if (regionProto == null) return Logger.WarnReturn(false, "UpdateMatchQueue(): regionProto == null");
+
+            bool isUpdatingSelf = playerGuid == DatabaseUniqueId;
+
+            // Update MatchQueueStatus server-side
+            MatchQueueStatus.UpdateQueue(regionRef, difficultyTierRef, groupId, playersInQueue);
+            bool changed = MatchQueueStatus.UpdatePlayerState(playerGuid, regionRef, difficultyTierRef, groupId, status, playerName);
+
+            // Update MatchQueueStatus client-side
+            SendMatchQueueUpdate(playerGuid, regionRef, difficultyTierRef, groupId, status, playerName);
+
+            // Send banners if we are self-updating.
+            if (isUpdatingSelf)
+            {
+                switch (status)
+                {
+                    case RegionRequestQueueUpdateVar.eRRQ_RaidNotAllowed:
+                    case RegionRequestQueueUpdateVar.eRRQ_PartyTooLarge:
+                        SendBannerMessage(GameDatabase.UIGlobalsPrototype.MessageQueueNotAvailableInRaid);
+                        break;
+
+                    case RegionRequestQueueUpdateVar.eRRQ_WaitingInWaitlist:
+                        SendBannerMessage(GameDatabase.UIGlobalsPrototype.MessageTeleportTargetIsInMatch);
+                        break;
+                }
+            }
+
+            // Send chat log message if the status actually changed.
+            if (changed)
+            {
+                CommunityMember member = Community.GetMember(playerGuid);
+
+                string chatLogPlayerName;
+
+                // Get up to date player name if possible.
+                if (isUpdatingSelf)
+                    chatLogPlayerName = GetName();
+                else if (member != null)
+                    chatLogPlayerName = member.GetName();
+                else
+                    chatLogPlayerName = playerName;
+
+                var chatLogMessage = NetMessageChatFromMetaGame.CreateBuilder()
+                    .SetSourceStringId((ulong)GameDatabase.GlobalsPrototype.SystemLocalized)
+                    .SetMessageStringId((ulong)GameDatabase.TransitionGlobalsPrototype.GetLocaleStringIdForLog(status))
+                    .SetPlayerName1(chatLogPlayerName)
+                    .AddArgStringIds((ulong)regionProto.RegionName)
+                    .Build();
+
+                SendMessage(chatLogMessage);
+            }
+
+            return true;
+        }
+
+        public void SendMatchQueueUpdate(ulong playerGuid, PrototypeId regionRef, PrototypeId difficultyTierRef, ulong groupId,
+            RegionRequestQueueUpdateVar status, string playerName = null, int playersInQueue = -1)
+        {
+            var builder = NetMessageMatchQueueUpdateClient.CreateBuilder()
+                .SetPlayerGuid(playerGuid)
+                .SetRegionProtoId((ulong)regionRef)
+                .SetDifficultyTierProtoId((ulong)difficultyTierRef)
+                .SetRegionRequestGroupId(groupId)
+                .SetStatus(status);
+
+            if (string.IsNullOrEmpty(playerName) == false)
+                builder.SetPlayerName(playerName);
+
+            if (playersInQueue >= 0)
+                builder.SetPlayersInQueue((uint)playersInQueue);
+
+            SendMessage(builder.Build());
+        }
+
+        public bool SendRegionRequestQueueCommandToPlayerManager(PrototypeId regionRef, PrototypeId difficultyTierRef,
+            RegionRequestQueueCommandVar command, ulong groupId = 0, ulong targetPlayerDbId = 0)
+        {
+            ulong playerDbId = DatabaseUniqueId;
+            ulong regionProtoId = (ulong)regionRef;
+            ulong difficultyTierProtoId = (ulong)difficultyTierRef;
+            ulong metaStateProtoId = 0;
+
+            switch (command)
+            {
+                case RegionRequestQueueCommandVar.eRRQC_AddToQueueSolo:
+                case RegionRequestQueueCommandVar.eRRQC_AddToQueueParty:
+                case RegionRequestQueueCommandVar.eRRQC_AddToQueueBypass:
+                    Avatar avatar = CurrentAvatar;
+
+                    PrototypeId metaGameRef = PrototypeId.Invalid;
+                    PrototypeId metaStateRef = PrototypeId.Invalid;
+                    TimeSpan time = TimeSpan.Zero;
+                    if (avatar != null && MetaGame.LoadMetaStateProgress(avatar, regionRef, difficultyTierRef, ref metaGameRef, ref metaStateRef, ref time))
+                    {
+                        RegionQueueStateEntryPrototype queueStateProto = regionRef.As<RegionPrototype>()?.GetRegionQueueStateEntry(metaStateRef);
+                        if (queueStateProto != null)
+                        {
+                            if (queueStateProto.CanQueue == false)
+                                return Logger.WarnReturn(false, "SendRegionRequestQueueCommandToPlayerManager(): queueStateProto.CanQueue == false");
+
+                            metaStateProtoId = (ulong)queueStateProto.State;
+                        }
+                    }
+
+                    break;
+            }
+
+            ServiceMessage.MatchRegionRequestQueueCommand message = new(playerDbId, regionProtoId, difficultyTierProtoId, metaStateProtoId, command, groupId, targetPlayerDbId);
+            ServerManager.Instance.SendMessageToService(GameServiceType.PlayerManager, message);
 
             return true;
         }
@@ -2718,11 +3080,363 @@ namespace MHServerEmu.Games.Entities
 
         #endregion
 
-        #region Trading
+        #region Trade
+
+        public void StartPlayerTrade(string partnerName)
+        {
+            if (IsPlayerTradeEnabled() == false)
+            {
+                SetPlayerTradeStatusCode(PlayerTradeStatusCode.ePTSC_Disabled);
+                return;
+            }
+
+            // This is client input, so case may not match for whatever reason.
+            if (string.Equals(PlayerTradePartnerName, partnerName, StringComparison.OrdinalIgnoreCase))
+            {
+                // If already trading with this player, send sync the current status and do an early exit.
+                if (PlayerTradeStatusCode == PlayerTradeStatusCode.ePTSC_SentInvitation ||
+                    PlayerTradeStatusCode == PlayerTradeStatusCode.ePTSC_TradeInProgress)
+                {
+                    SendPlayerTradeStatus();
+                    return;
+                }
+            }
+            else
+            {
+                // If trading with a different player, cancel that trade.
+                if (HasActiveTradingSession())
+                    CancelPlayerTrade();
+            }
+
+            Player tradePartner = Game.EntityManager.GetPlayerByName(partnerName);
+            if (tradePartner == null || tradePartner == this)
+            {
+                SetPlayerTradeStatusCode(PlayerTradeStatusCode.ePTSC_InvalidPartner);
+                return;
+            }
+
+            if (IsIgnoredPlayer(tradePartner.DatabaseUniqueId))
+            {
+                SetPlayerTradeStatusCode(PlayerTradeStatusCode.ePTSC_PartnerIsIgnored);
+                return;
+            }
+
+            // Send an invitation first if the partner doesn't have one already.
+            if (tradePartner.PlayerTradeStatusCode != PlayerTradeStatusCode.ePTSC_SentInvitation ||
+                tradePartner.PlayerTradePartnerName.Equals(GetName(), StringComparison.OrdinalIgnoreCase) == false)
+            {
+                if (tradePartner.HasActiveTradingSession() || tradePartner.IsIgnoredPlayer(DatabaseUniqueId))
+                {
+                    SetPlayerTradeStatusCode(PlayerTradeStatusCode.ePTSC_PartnerIsBusy);
+                    return;
+                }
+
+                SendPlayerTradeInvite(this, tradePartner);
+                return;
+            }
+
+            // Accept the invitation and start the trade!
+            AcceptPlayerTradeInvite(this, tradePartner);
+        }
 
         public void CancelPlayerTrade()
         {
-            // TODO
+            if (HasActiveTradingSession() == false)
+            {
+                SendPlayerTradeStatus();
+                return;
+            }
+
+            Player tradePartner = Game.EntityManager.GetPlayerByName(PlayerTradePartnerName);
+            if (tradePartner == null)
+            {
+                Logger.Warn("CancelPlayerTrade(): tradePartner == null");
+                return;
+            }
+
+            DoCancelPlayerTrade(this, tradePartner);     
+        }
+
+        public void SetPlayerTradeConfirmFlag(bool confirmFlag, uint sequenceNumber)
+        {
+            if (PlayerTradeStatusCode != PlayerTradeStatusCode.ePTSC_TradeInProgress || PlayerTradeSequenceNumber != sequenceNumber)
+            {
+                SendPlayerTradeStatus();
+                return;
+            }
+
+            Player tradePartner = Game.EntityManager.GetPlayerByName(PlayerTradePartnerName);
+            if (tradePartner == null)
+            {
+                Logger.Warn("SetPlayerTradeConfirmFlag(): tradePartner == null");
+                return;
+            }
+
+            confirmFlag &= HasInventorySpaceToReceivePlayerTrade();
+
+            PlayerTradeConfirmFlag = confirmFlag;
+            tradePartner.PlayerTradePartnerConfirmFlag = confirmFlag;
+
+            if (PlayerTradeConfirmFlag && tradePartner.PlayerTradeConfirmFlag)
+                ExecutePlayerTrade(this, tradePartner);
+
+            SendPlayerTradeStatus();
+            tradePartner.SendPlayerTradeStatus();
+        }
+
+        public void OnPlayerTradeInventoryChanged()
+        {
+            if (PlayerTradeStatusCode != PlayerTradeStatusCode.ePTSC_TradeInProgress)
+                return;
+
+            Player tradePartner = Game.EntityManager.GetPlayerByName(PlayerTradePartnerName);
+            if (tradePartner == null)
+            {
+                Logger.Warn("OnPlayerTradeInventoryChanged(): tradePartner == null");
+                return;
+            }
+
+            IncrementPlayerTradeSequenceNumber();
+            tradePartner.IncrementPlayerTradeSequenceNumber();
+        }
+
+        public static bool IsPlayerTradeEnabled()
+        {
+            return LiveTuningManager.GetLiveGlobalTuningVar(GlobalTuningVar.eGTV_PlayerTradeEnabled) != 0f;
+        }
+
+        public bool HasActiveTradingSession()
+        {
+            switch (PlayerTradeStatusCode)
+            {
+                case PlayerTradeStatusCode.ePTSC_SentInvitation:
+                case PlayerTradeStatusCode.ePTSC_ReceivedInvitation:
+                case PlayerTradeStatusCode.ePTSC_TradeInProgress:
+                    return true;
+
+                default:
+                    return false;
+            }
+        }
+
+        private static void SendPlayerTradeInvite(Player initiator, Player target)
+        {
+            initiator.PlayerTradeStatusCode = PlayerTradeStatusCode.ePTSC_SentInvitation;
+            initiator.PlayerTradePartnerName = target.GetName();
+            initiator.SendPlayerTradeStatus();
+
+            target.PlayerTradeStatusCode = PlayerTradeStatusCode.ePTSC_ReceivedInvitation;
+            target.PlayerTradePartnerName = initiator.GetName();
+            target.SendPlayerTradeStatus();
+        }
+
+        private static void AcceptPlayerTradeInvite(Player initiator, Player target)
+        {
+            initiator.InitializeTradeInProgress(target);
+
+            target.InitializeTradeInProgress(initiator);
+        }
+
+        private static void DoCancelPlayerTrade(Player initiator, Player target)
+        {
+            initiator.PlayerTradeStatusCode = PlayerTradeStatusCode.ePTSC_Cancelled;
+            initiator.AOI.ConsiderEntity(target);
+            initiator.SendPlayerTradeStatus();
+            initiator.ClearPlayerTradeInventory();
+
+            target.PlayerTradeStatusCode = PlayerTradeStatusCode.ePTSC_PartnerCancelled;
+            target.AOI.ConsiderEntity(initiator);
+            target.SendPlayerTradeStatus();
+            target.ClearPlayerTradeInventory();
+        }
+
+        private static void ExecutePlayerTrade(Player initiator, Player target)
+        {
+            initiator.PlayerTradeStatusCode = PlayerTradeStatusCode.ePTSC_TradeExecuted;
+            initiator.AOI.ConsiderEntity(target);
+
+            target.PlayerTradeStatusCode = PlayerTradeStatusCode.ePTSC_TradeExecuted;
+            target.AOI.ConsiderEntity(initiator);
+
+            ExchangePlayerTradeInventories(initiator, target);
+        }
+
+        /// <summary>
+        /// Updates the value of <see cref="PlayerTradeStatusCode"/> and sends it to the client.
+        /// </summary>
+        private void SetPlayerTradeStatusCode(PlayerTradeStatusCode status)
+        {
+            PlayerTradeStatusCode = status;
+            SendPlayerTradeStatus();
+        }
+
+        private void InitializeTradeInProgress(Player tradePartner)
+        {
+            PlayerTradeStatusCode = PlayerTradeStatusCode.ePTSC_TradeInProgress;
+            PlayerTradeConfirmFlag = false;
+            PlayerTradePartnerConfirmFlag = false;
+            PlayerTradeSequenceNumber = 0;
+
+            AOI.ConsiderEntity(tradePartner);
+            SendPlayerTradeStatus();
+        }
+
+        private void IncrementPlayerTradeSequenceNumber()
+        {
+            PlayerTradeConfirmFlag = false;
+            PlayerTradePartnerConfirmFlag = false;
+            PlayerTradeSequenceNumber++;
+
+            SendPlayerTradeStatus();
+        }
+
+        private bool HasInventorySpaceToReceivePlayerTrade()
+        {
+            if (PlayerTradeStatusCode != PlayerTradeStatusCode.ePTSC_TradeInProgress)
+                return false;
+
+            Player tradePartner = Game.EntityManager.GetPlayerByName(PlayerTradePartnerName);
+
+            Inventory playerGeneralInventory = GetInventory(InventoryConvenienceLabel.General);
+            if (playerGeneralInventory == null) return Logger.WarnReturn(false, "HasInventorySpaceToReceivePlayerTrade(): playerGeneralInventory == null");
+
+            Inventory partnerTradeInventory = tradePartner?.GetInventory(InventoryConvenienceLabel.Trade);
+            if (partnerTradeInventory == null) return Logger.WarnReturn(false, "HasInventorySpaceToReceivePlayerTrade(): partnerTradeInventory == null");
+
+            return partnerTradeInventory.Count <= playerGeneralInventory.CapacityRemaining;
+        }
+
+        private bool GetInventoriesForPlayerTrade(out Inventory tradeInv, out Inventory generalInv, out Inventory fallbackInv)
+        {
+            tradeInv = null;
+            generalInv = null;
+            fallbackInv = null;
+
+            tradeInv = GetInventory(InventoryConvenienceLabel.Trade);
+            if (tradeInv == null) return Logger.WarnReturn(false, "GetInventoriesForPlayerTrade(): tradeInv == null");
+
+            generalInv = GetInventory(InventoryConvenienceLabel.General);
+            if (generalInv == null) return Logger.WarnReturn(false, "GetInventoriesForPlayerTrade(): generalInv == null");
+
+            fallbackInv = GetInventory(InventoryConvenienceLabel.DeliveryBox);
+            if (fallbackInv == null) return Logger.WarnReturn(false, "GetInventoriesForPlayerTrade(): initiatorFallbackInv == null");
+
+            return true;
+        }
+
+        private static bool ExchangePlayerTradeInventories(Player playerA, Player playerB)
+        {
+            if (playerA.GetInventoriesForPlayerTrade(out Inventory tradeInvA, out Inventory generalInvA, out Inventory fallbackInvA) == false)
+                return Logger.WarnReturn(false, $"ExchangePlayerTradeInventories(): Failed to get one or more trade inventories for initiator player [{playerA}]");
+
+            if (playerB.GetInventoriesForPlayerTrade(out Inventory tradeInvB, out Inventory generalInvB, out Inventory fallbackInvB) == false)
+                return Logger.WarnReturn(false, $"ExchangePlayerTradeInventories(): Failed to get one or more trade inventories for target player [{playerA}]");
+
+            using var itemsAHandle = ListPool<Entity>.Instance.Get(out List<Entity> itemsA);
+            using var itemsBHandle = ListPool<Entity>.Instance.Get(out List<Entity> itemsB);
+
+            GatherItemsForPlayerTrade(tradeInvA, itemsA);
+            GatherItemsForPlayerTrade(tradeInvB, itemsB);
+
+            ReceiveItemsFromPlayerTrade(playerA, itemsA, generalInvB, fallbackInvB);
+            ReceiveItemsFromPlayerTrade(playerB, itemsB, generalInvA, fallbackInvA);
+
+            return true;
+        }
+
+        private static void GatherItemsForPlayerTrade(Inventory tradeInv, List<Entity> items)
+        {
+            EntityManager entityManager = tradeInv.Game.EntityManager;
+
+            while (tradeInv.Count > 0)
+            {
+                ulong entityId = tradeInv.GetAnyEntity();
+                Entity entity = entityManager.GetEntity<Entity>(entityId);
+                
+                if (entity == null)
+                {
+                    Logger.Error("GatherItemsForPlayerTrade(): entity == null");
+                    return;
+                }
+
+                if (entity.ChangeInventoryLocation(null) != InventoryResult.Success)
+                {
+                    Logger.Error($"GatherItemsForPlayerTrade(): Failed to remove entity [{entity}] from the trade inventory");
+                    return;
+                }
+
+                items.Add(entity);
+            }
+        }
+
+        private static void ReceiveItemsFromPlayerTrade(Player oldOwner, List<Entity> items, Inventory destinationInv, Inventory fallbackInv)
+        {
+            Player newOwner = (Player)destinationInv.Owner;
+
+            while (items.Count > 0)
+            {
+                int i = items.Count - 1;
+                Entity item = items[i];
+                int oldStackSize = item.CurrentStackSize;
+
+                ulong? stackId = 0;
+                InventoryResult result = item.ChangeInventoryLocation(destinationInv, Inventory.InvalidSlot, ref stackId, true);
+                
+                if (result != InventoryResult.Success)
+                {
+                    Logger.Warn($"ReceiveItemsFromPlayerTrade(): Failed to move item [{item}] to destination inventory with result {result}!\noldOwner=[{oldOwner}], newOwner=[{newOwner}]");
+
+                    result = item.ChangeInventoryLocation(fallbackInv, Inventory.InvalidSlot, ref stackId, true);
+
+                    if (result != InventoryResult.Success)
+                        Logger.Error($"ReceiveItemsFromPlayerTrade(): Failed to move item [{item}] to fallback inventory with result {result}!\noldOwner=[{oldOwner}], newOwner=[{newOwner}]");
+                }
+
+                // Do not remove the item yet if we only moved a part of a stack.
+                int newStackSize = item.CurrentStackSize;
+                if (stackId != 0 && item.IsDestroyed == false && newStackSize > 0 && newStackSize < oldStackSize)
+                    continue;
+
+                Logger.Trace($"ReceiveItemsFromPlayerTrade(): [{oldOwner}] => [{newOwner}] - [{item}]");
+                items.RemoveAt(i);
+            }
+        }
+
+        private bool ClearPlayerTradeInventory()
+        {
+            if (GetInventoriesForPlayerTrade(out Inventory tradeInv, out Inventory generalInv, out Inventory fallbackInv) == false)
+                return Logger.WarnReturn(false, $"ClearPlayerTradeInventory(): Failed to get one or more of the trade inventories for player [{this}]");
+
+            EntityManager entityManager = Game.EntityManager;
+
+            while (tradeInv.Count > 0)
+            {
+                ulong entityId = tradeInv.GetAnyEntity();
+                Entity entity = entityManager.GetEntity<Entity>(entityId);
+                if (entity == null) return Logger.WarnReturn(false, "ClearPlayerTradeInventory(): entity == null");
+
+                if (entity.ChangeInventoryLocation(generalInv) != InventoryResult.Success)
+                {
+                    Logger.Warn($"ClearPlayerTradeInventory(): Failed to return [{entity}] to general inventory for player [{this}]");
+                    if (entity.ChangeInventoryLocation(fallbackInv) != InventoryResult.Success)
+                        return Logger.ErrorReturn(false, $"ClearPlayerTradeInventory(): Failed to return [{entity}] to fallback inventory for player [{this}]");
+                }
+            }
+
+            return true;
+        }
+
+        private void SendPlayerTradeStatus()
+        {
+            NetMessagePlayerTradeStatus playerTradeStatus = NetMessagePlayerTradeStatus.CreateBuilder()
+                .SetStatusCode(PlayerTradeStatusCode)
+                .SetPartnerPlayerName(PlayerTradePartnerName)
+                .SetConfirmFlag(PlayerTradeConfirmFlag)
+                .SetPartnerConfirmFlag(PlayerTradePartnerConfirmFlag)
+                .SetSequenceNumber(PlayerTradeSequenceNumber)
+                .Build();
+
+            SendMessage(playerTradeStatus);
         }
 
         #endregion
@@ -3016,18 +3730,19 @@ namespace MHServerEmu.Games.Entities
             SendMessage(message.Build());
         }
 
-        public void SendAIAggroNotification(PrototypeId bannerMessageRef, Agent aiAgent, Player targetPlayer, bool party = false)
+        public void SendAIAggroNotification(PrototypeId bannerMessageRef, Agent aiAgent, Player aggroPlayer, bool sendToParty = false)
         {
-            if (party)
+            if (sendToParty)
             {
-                // TODO send to party members
+                Party party = GetParty();
+                party?.SendAIAggroNotification(bannerMessageRef, aiAgent, aggroPlayer);
             }
             else
             {
                 var message = NetMessageAIAggroNotification.CreateBuilder()
                     .SetBannerMessageRef((ulong)bannerMessageRef)
                     .SetAiRef((ulong)aiAgent.PrototypeDataRef)
-                    .SetPlayerId(targetPlayer.Id)
+                    .SetPlayerId(aggroPlayer.Id)
                     .Build();
 
                 SendMessage(message);
@@ -3171,17 +3886,35 @@ namespace MHServerEmu.Games.Entities
             SendMessage(message.Build());
         }
 
-        public void SendBannerMessage(BannerMessagePrototype bannerMessage)
+        public bool SendBannerMessage(LocaleStringId bannerText, PrototypeId textStyle = TextStylePrototype.BannerMessageStandard, int timeToLiveMS = 8000,
+            BannerMessageStyle messageStyle = BannerMessageStyle.Standard, bool doNotQueue = false, bool showImmediately = false)
         {
-            if (bannerMessage == null) return;
+            // We can send custom banner messages here using localized strings added via achievements.
             var message = NetMessageBannerMessage.CreateBuilder()
-                .SetBannerText((ulong)bannerMessage.BannerText)
-                .SetTextStyle((ulong)bannerMessage.TextStyle)
-                .SetTimeToLiveMS((uint)bannerMessage.TimeToLiveMS)
-                .SetMessageStyle((uint)bannerMessage.MessageStyle)
-                .SetDoNotQueue(bannerMessage.DoNotQueue)
-                .SetShowImmediately(bannerMessage.ShowImmediately).Build();
+                .SetBannerText((ulong)bannerText)
+                .SetTextStyle((ulong)textStyle)
+                .SetTimeToLiveMS((uint)timeToLiveMS)
+                .SetMessageStyle((uint)messageStyle)
+                .SetDoNotQueue(doNotQueue)
+                .SetShowImmediately(showImmediately)
+                .Build();
+
             SendMessage(message);
+
+            return true;
+        }
+
+        public bool SendBannerMessage(BannerMessagePrototype bannerMessageProto)
+        {
+            if (bannerMessageProto == null) return Logger.WarnReturn(false, "SendBannerMessage(): bannerMessageProto == null");
+
+            return SendBannerMessage(bannerMessageProto.BannerText, bannerMessageProto.TextStyle, bannerMessageProto.TimeToLiveMS,
+                bannerMessageProto.MessageStyle, bannerMessageProto.DoNotQueue, bannerMessageProto.ShowImmediately);
+        }
+
+        public bool SendBannerMessage(PrototypeId bannerMessageProtoRef)
+        {
+            return SendBannerMessage(bannerMessageProtoRef.As<BannerMessagePrototype>());
         }
 
         #endregion
@@ -3199,6 +3932,40 @@ namespace MHServerEmu.Games.Entities
             ScoringEventContext = new(this);
             AchievementManager.OnUpdateEventContext();
             LeaderboardManager.OnUpdateEventContext();
+        }
+
+        private void UpdatePartyFilters(List<AvatarPrototype> avatars, List<CostumePrototype> costumes, int playerIndex)
+        {
+            bool updateContext = false;
+
+            Party party = GetParty();
+            if (party != null && party.Type == GroupType.GroupType_Party && avatars.Count > 0)
+            {
+                using var newFiltersHandle = ListPool<PrototypeId>.Instance.Get(out List<PrototypeId> newFilters);
+
+                foreach (PrototypeId partyFilterProtoRef in DataDirectory.Instance.IteratePrototypesInHierarchy<PartyFilterPrototype>(PrototypeIterateFlags.NoAbstractApprovedOnly))
+                {
+                    PartyFilterPrototype partyFilterProto = partyFilterProtoRef.As<PartyFilterPrototype>();
+                    if (partyFilterProto.Evaluate(avatars, costumes, playerIndex))
+                        newFilters.Add(partyFilterProtoRef);
+                }
+
+                newFilters.Sort();
+
+                if (PartyFilters.SequenceEqual(newFilters) == false)
+                {
+                    PartyFilters.Set(newFilters);
+                    updateContext = true;
+                }
+            }
+            else if (PartyFilters.Count > 0)
+            {
+                PartyFilters.Clear();
+                updateContext = true;
+            }
+
+            if (updateContext)
+                UpdateScoringEventContext();
         }
 
         #endregion
@@ -3469,21 +4236,17 @@ namespace MHServerEmu.Games.Entities
             }
         }
 
-        private void SetGiftingRestrictions()
-        {
-            // Email is always verified (for now)
-            _emailVerified = true;
-
-            // We are taking advantage of the fact that our database guids include account creation timestamp.
-            // Review this code if this ever changes.
-            _accountCreationTimestamp = TimeSpan.FromSeconds(DatabaseUniqueId >> 16 & 0xFFFFFFFF);
-        }
-
         #endregion
 
         #region Communities
 
         // Community update broadcasts are done via scheduled events to avoid multiple broadcasts at once.
+
+        public bool IsIgnoredPlayer(ulong playerDbId)
+        {
+            CommunityCircle ignoreCircle = Community?.GetCircle(CircleId.__Ignore);
+            return ignoreCircle != null && ignoreCircle.ContainsPlayerDbGuid(playerDbId);
+        }
 
         public void ScheduleCommunityBroadcast()
         {
@@ -3499,23 +4262,59 @@ namespace MHServerEmu.Games.Entities
             Region region = GetRegion();
             Avatar avatar = CurrentAvatar;
 
+            ulong currentRegionRefId = 0;
+            ulong currentDifficultyRefId = 0;
+            ulong avatarRefId = 0;
+            ulong costumeRefId = 0;
+            uint level = 0;
+            uint prestigeLevel = 0;
+
+            if (region != null)
+            {
+                currentRegionRefId = (ulong)region.PrototypeDataRef;
+                currentDifficultyRefId = (ulong)region.DifficultyTierRef;
+            }
+
+            if (avatar != null)
+            {
+                avatarRefId = (ulong)avatar.PrototypeDataRef;
+                costumeRefId = (ulong)avatar.GetCurrentCostumePrototypeRef();
+                level = (uint)avatar.CharacterLevel;
+                prestigeLevel = (uint)avatar.PrestigeLevel;
+            }
+
             return CommunityMemberBroadcast.CreateBuilder()
                 .SetMemberPlayerDbId(DatabaseUniqueId)
-                .SetCurrentRegionRefId(region != null ? (ulong)region.PrototypeDataRef : 0)
-                .SetCurrentDifficultyRefId(region != null ? (ulong)region.DifficultyTierRef : 0)
+                .SetCurrentRegionRefId(currentRegionRefId)
+                .SetCurrentDifficultyRefId(currentDifficultyRefId)
                 .AddSlots(CommunityMemberAvatarSlot.CreateBuilder()
-                    .SetAvatarRefId(avatar != null ? (ulong)avatar.PrototypeDataRef : 0)
-                    .SetCostumeRefId(avatar != null ? (ulong)avatar.EquippedCostumeRef : 0)
-                    .SetLevel(avatar != null ? (uint)avatar.CharacterLevel : 0)
-                    .SetPrestigeLevel(avatar != null ? (uint)avatar.PrestigeLevel : 0))
+                    .SetAvatarRefId(avatarRefId)
+                    .SetCostumeRefId(costumeRefId)
+                    .SetLevel(level)
+                    .SetPrestigeLevel(prestigeLevel))
                 .SetCurrentPlayerName(GetName())
                 .SetIsOnline(1)
                 .Build();
         }
 
+        public void OnCommunityCircleChanged(CircleId circleId)
+        {
+            if (circleId != CircleId.__Party)
+                return;
+
+            if (_communityPartyCircleChangedEvent.IsValid)
+                return;
+
+            Game.GameEventScheduler.ScheduleEvent(_communityPartyCircleChangedEvent, TimeSpan.FromMilliseconds(1000), _pendingEvents);
+            _communityPartyCircleChangedEvent.Get()?.Initialize(this);
+        }
+
         private void DoCommunityBroadcast()
         {
-            // TODO: Send a broadcast message to the player manager to update other game instances
+            // Send a status update to the player manager. It will be relayed to subscribers in other game instances.
+            CommunityMemberBroadcast broadcast = BuildCommunityBroadcast();
+            ServiceMessage.CommunityStatusUpdate statusUpdate = new(broadcast);
+            ServerManager.Instance.SendMessageToService(GameServiceType.PlayerManager, statusUpdate);
 
             // Update players in this game instance
             foreach (Player otherPlayer in new PlayerIterator(Game))
@@ -3529,6 +4328,461 @@ namespace MHServerEmu.Games.Entities
 
                 community.RequestLocalBroadcast(member);
             }
+        }
+
+        private bool OnPartyCircleChanged()
+        {
+            CommunityCircle partyCircle = Community?.GetCircle(CircleId.__Party);
+            if (partyCircle == null) return Logger.WarnReturn(false, "OnPartyCircleChanged(): partyCircle == null");
+
+            using var avatarsHandle = ListPool<AvatarPrototype>.Instance.Get(out List<AvatarPrototype> avatars);
+            using var costumesHandle = ListPool<CostumePrototype>.Instance.Get(out List<CostumePrototype> costumes);
+
+            ulong playerDbId = DatabaseUniqueId;
+            int playerIndex = -1;
+
+            int i = 0;
+            foreach (CommunityMember member in Community.IterateMembers(partyCircle))
+            {
+                AvatarSlotInfo slot = member.GetAvatarSlotInfo();
+                if (slot == null || slot.AvatarRef == PrototypeId.Invalid || slot.CostumeRef == PrototypeId.Invalid)
+                    continue;
+
+                AvatarPrototype avatarProto = slot.AvatarRef.As<AvatarPrototype>();
+                if (avatarProto == null)
+                {
+                    Logger.Warn("OnPartyCircleChanged(): avatarProto == null");
+                    continue;
+                }
+
+                CostumePrototype costumeProto = slot.CostumeRef.As<CostumePrototype>();
+                if (costumeProto == null)
+                {
+                    Logger.Warn("OnPartyCircleChanged(): costumeProto == null");
+                    continue;
+                }
+
+                avatars.Add(avatarProto);
+                costumes.Add(costumeProto);
+
+                if (member.DbId == playerDbId)
+                    playerIndex = i;
+
+                i++;
+            }
+
+            UpdatePartyFilters(avatars, costumes, playerIndex);
+
+            return true;
+        }
+
+        #endregion
+
+        #region Parties
+
+        public Party GetParty()
+        {
+            ulong partyId = PartyId;
+            if (partyId == 0)
+                return null;
+
+            return Game.PartyManager.GetParty(partyId);
+        }
+
+        public bool IsPartyLeader()
+        {
+            Party party = GetParty();
+            if (party == null)
+                return false;
+
+            return party.LeaderId == DatabaseUniqueId;
+        }
+
+        public bool IsInPartyWith(ulong playerDbId)
+        {
+            if (playerDbId == 0)
+                return false;
+
+            // Players are always implicitly in party with themselves even if an explicit party instance does not exist.
+            if (playerDbId == DatabaseUniqueId)
+                return true;
+
+            Party party = GetParty();
+            if (party == null)
+                return false;
+
+            return party.IsMember(playerDbId);
+        }
+
+        public bool CanFormParty()
+        {
+            Region region = GetRegion();
+            if (region == null) return Logger.WarnReturn(false, "CanFormParty(): region == null");
+
+            return region.AllowsPartyFormation;
+        }
+
+        public void BeginTeleportToPartyMember(ulong targetPlayerDbId)
+        {
+            if (targetPlayerDbId == 0)
+                return;
+
+            Avatar avatar = CurrentAvatar;
+            if (avatar == null)
+                return;
+
+            PrototypeId teleportToPartyMemberPower = GameDatabase.GlobalsPrototype.TeleportToPartyMemberPower;
+
+            PowerActivationSettings settings = new(avatar.Id, Vector3.Zero, avatar.RegionLocation.Position);
+            settings.Flags |= PowerActivationSettingsFlags.NotifyOwner;
+            if (avatar.ActivatePower(teleportToPartyMemberPower, ref settings) != PowerUseResult.Success)
+                return;
+
+            Properties[PropertyEnum.PendingTeleportPartyMemberId] = targetPlayerDbId;
+        }
+
+        public void ScheduleTeleportToPartyMember()
+        {
+            ulong pendingTeleportPartyMemberId = Properties[PropertyEnum.PendingTeleportPartyMemberId];
+            if (pendingTeleportPartyMemberId == 0)
+            {
+                Logger.Warn("ScheduleTeleportToPartyMember(): pendingTeleportPartyMemberId == 0");
+                return;
+            }
+
+            ScheduleEntityEvent(_teleportToPartyMemberEvent, TimeSpan.Zero, pendingTeleportPartyMemberId);
+
+            Properties.RemoveProperty(PropertyEnum.PendingTeleportPartyMemberId);
+        }
+
+        public void OnAddedToParty(Party party)
+        {
+            if (PartyId != 0)
+            {
+                Logger.Warn($"OnAddedToParty(): Already in party 0x{PartyId:X}");
+                return;
+            }
+
+            _partyId.Set(party.PartyId);
+            UpdatePartyAOI(party);
+
+            Avatar avatar = CurrentAvatar;
+            if (avatar != null && avatar.IsInWorld)
+            {
+                avatar.AssignPartyBonusPower();
+                avatar.SyncPartyBoostConditions();
+            }
+
+            // TODO: sync discovery data
+
+            // we should receive a OnPartySizeChanged callback after this
+        }
+
+        public void OnRemovedFromParty(Party party, GroupLeaveReason reason)
+        {
+            _partyId.Set(0);
+            UpdatePartyAOI(party);
+
+            Avatar avatar = CurrentAvatar;
+            if (avatar != null && avatar.IsInWorld)
+            {
+                AOI.Update(avatar.RegionLocation.Position, true);
+                avatar.UnassignPartyBonusPower();
+                avatar.SetPartySize(1);
+                avatar.ResetPartyBoostConditions();
+            }
+
+            // Need to do community cleanup here because we will no longer get OnPartySizeChanged callbacks.
+            Community.UpdateParty(null);
+
+            Region region = GetRegion();
+            if (region != null)
+            {
+                region.PlayerLeavePartyEvent.Invoke(new(this));
+                region.PartySizeChangedEvent.Invoke(new(this, 1));
+            }
+
+            RegionPrototype bodyslideRegionProto = GameDatabase.GetPrototype<RegionPrototype>(Properties[PropertyEnum.BodySliderRegionRef]);
+            if (bodyslideRegionProto != null && bodyslideRegionProto.IsPrivate)
+                RemoveBodysliderProperties();
+        }
+
+        public void OnPartySizeChanged(Party party)
+        {
+            int partySize = party.NumMembers;
+
+            CurrentAvatar?.SetPartySize(partySize);
+
+            Region region = GetRegion();
+            region?.PartySizeChangedEvent.Invoke(new(this, partySize));
+
+            Community.UpdateParty(party);
+        }
+
+        public void RefreshPartyOnRegionEnter(Party party)
+        {
+            _partyId.Set(party.PartyId);
+            UpdatePartyAOI(party);
+            Community.UpdateParty(party);
+        }
+
+        private void UpdatePartyAOI(Party party)
+        {
+            // NOTE: We need to pass the party instance as an argument because by the time
+            // we get here when we leave a party, we no longer have a reference to it.
+
+            if (party == null)
+                return;
+
+            EntityManager entityManager = Game.EntityManager;
+
+            foreach (var kvp in party)
+            {
+                ulong memberId = kvp.Value.PlayerDbId;
+                if (memberId == DatabaseUniqueId)
+                    continue;
+
+                Player partyMember = entityManager.GetEntityByDbGuid<Player>(memberId);
+                if (partyMember == null)
+                    continue;
+
+                AOI.ConsiderEntity(partyMember);
+                partyMember.AOI.ConsiderEntity(this);
+            }
+        }
+
+        private bool TeleportToPartyMember(ulong targetPlayerDbId)
+        {
+            if (PlayerConnection.HasPendingRegionTransfer)
+                return false;
+
+            if (targetPlayerDbId == 0 || targetPlayerDbId == DatabaseUniqueId)
+                return false;
+
+            // Check avatar
+            Avatar avatar = CurrentAvatar;
+            if (avatar == null) return Logger.WarnReturn(false, "TeleportToPartyMember(): avatar == null");
+
+            if (avatar.IsInWorld == false)
+                return false;
+
+            if (avatar.IsDead)
+                return false;
+
+            // Check party
+            Party party = GetParty();
+            if (party == null)
+                return false;
+
+            if (party.IsMember(targetPlayerDbId) == false)
+                return false;
+
+            // Check destination region, use community data for this
+            CommunityMember member = Community.GetMember(targetPlayerDbId);
+            PrototypeId targetRegionProtoRef = PrototypeId.Invalid;
+
+            if (member != null)
+            {
+                targetRegionProtoRef = member.RegionRef;
+                PrototypeId difficultyProtoRef = member.DifficultyRef;
+                if (targetRegionProtoRef != PrototypeId.Invalid && difficultyProtoRef != PrototypeId.Invalid)
+                {
+                    if (CanEnterRegion(targetRegionProtoRef, difficultyProtoRef, true) == false)
+                        return false;
+                }
+            }
+
+            // Request queue if we are teleporting to a player in a different region, and it is a match region.
+            Player targetPlayer = Game.EntityManager.GetEntityByDbGuid<Player>(targetPlayerDbId);
+            Region targetRegion = targetPlayer?.GetRegion();
+
+            // We are guaranteed to have a current region here because we check above that our avatar is in the world.
+            if (targetRegion == null || targetRegion.Id != GetRegion().Id)
+            {
+                RegionPrototype targetRegionProto = targetRegionProtoRef.As<RegionPrototype>();
+                if (targetRegionProto != null && targetRegionProto.IsQueueRegion)
+                {
+                    SendRegionRequestQueueCommandToPlayerManager(PrototypeId.Invalid, PrototypeId.Invalid, RegionRequestQueueCommandVar.eRRQC_RequestToJoinGroup, 0, targetPlayerDbId);
+                    return true;
+                }
+            }
+
+            // Teleport
+            using Teleporter teleporter = ObjectPoolManager.Instance.Get<Teleporter>();
+            teleporter.Initialize(this, TeleportContextEnum.TeleportContext_Party);
+            return teleporter.TeleportToPlayer(targetPlayerDbId);
+        }
+
+        #endregion
+
+        #region Guild
+
+        public Social.Guilds.Guild GetGuild()
+        {
+            return Game.GuildManager.GetGuild(_guildId);
+        }
+
+        public bool SetGuildMembership(ulong guildId, string guildName, GuildMembership guildMembership)
+        {
+            if (_guildId == guildId && _guildName == guildName && _guildMembership == guildMembership)
+                return false;
+
+            _guildId = guildId;
+            _guildName = guildName;
+            _guildMembership = guildMembership;
+
+            foreach (Avatar avatar in new AvatarIterator(this))
+                avatar.SetGuildMembership(guildId, guildName, guildMembership);
+
+            GuildMember.SendEntityGuildInfo(this, guildId, guildName, guildMembership);
+
+            if (guildId != GuildManager.InvalidGuildId)
+            {
+                Social.Guilds.Guild guild = Game.GuildManager.GetGuild(guildId);
+                if (guild != null)
+                    Community.UpdateGuild(guild);
+                else
+                    Logger.Warn("SetGuildMembership(): guild == null");
+            }
+            else
+            {
+                Community.UpdateGuild(null);
+            }
+
+            return true;
+        }
+
+        public bool GuildsAreUnlocked()
+        {
+            // This property check existed in older versions of the game (at least 1.10-1.25), but it had been removed as of 1.48.
+            // Although it's meaningless in later versions, I'm leaving this in for consistency / reference.
+            //return Properties[PropertyEnum.GuildsUnlocked];
+            return true;
+        }
+
+        public bool UnlockGuilds(bool value)
+        {
+            // See GuildsAreUnlocked()
+            return true;
+        }
+
+        #endregion
+
+        #region MTXStore
+
+        public bool IsGiftingAllowed()
+        {
+            // This function mirrors the client-side check and does not include any custom restrictions.
+            NetStructGameOptions options = Game.GameOptions;
+
+            if (_emailVerified == false)
+                return false;
+
+            TimeSpan accountAge = Clock.UnixTime - _accountCreationTimestamp;
+
+            if ((int)accountAge.TotalDays < options.GiftingAccountAgeInDaysRequired)
+                return false;
+
+            if (Properties.HasProperty(PropertyEnum.PlayerMaxAvatarLevel) == false)
+                return false;
+
+            if (Properties[PropertyEnum.PlayerMaxAvatarLevel] < options.GiftingAvatarLevelRequired)
+                return false;
+
+            if (Properties[PropertyEnum.LoginCount] < options.GiftingLoginCountRequired)
+                return false;
+
+            return true;
+        }
+
+        private void SetGiftingRestrictions()
+        {
+            // Email is always verified (for now)
+            _emailVerified = true;
+
+            // We are taking advantage of the fact that our database guids include account creation timestamp.
+            // Review this code if this ever changes.
+            _accountCreationTimestamp = TimeSpan.FromSeconds(DatabaseUniqueId >> 16 & 0xFFFFFFFF);
+        }
+
+        #endregion
+
+        #region Perma Buffs
+
+        public bool UnlockPermaBuff(PrototypeId permaBuffProtoRef)
+        {
+            if (Properties[PropertyEnum.PermaBuff, permaBuffProtoRef])
+                return Logger.WarnReturn(false, $"UnlockPermaBuff(): PermaBuff {permaBuffProtoRef.GetName()} is already unlocked for player [{this}]");
+
+            Properties[PropertyEnum.PermaBuff, permaBuffProtoRef] = true;
+
+            if (ApplyPermaBuff(permaBuffProtoRef) == false)
+                return Logger.WarnReturn(false, $"UnlockPermaBuff(): Failed to apply PermaBuff {permaBuffProtoRef.GetName()} to player [{this}]");
+
+            SendMessage(NetMessagePermaBuffUnlock.CreateBuilder()
+                .SetPermaBuffProtoId((ulong)permaBuffProtoRef)
+                .Build());
+
+            return true;
+        }
+
+        private void InitPermaBuffs()
+        {
+            _permaBuffProperties.Clear();
+
+            using PropertyCollection unlockedPermaBuffs = ObjectPoolManager.Instance.Get<PropertyCollection>();
+            unlockedPermaBuffs.CopyPropertyRange(Properties, PropertyEnum.PermaBuff);
+
+            foreach (var kvp in unlockedPermaBuffs.IteratePropertyRange(PropertyEnum.PermaBuff))
+            {
+                Property.FromParam(kvp.Key, 0, out PrototypeId permaBuffProtoRef);
+                if (permaBuffProtoRef == PrototypeId.Invalid)
+                {
+                    Logger.Warn("InitPermaBuffs(): permaBuffProtoRef == PrototypeId.Invalid");
+                    continue;
+                }
+
+                if (ApplyPermaBuff(permaBuffProtoRef) == false)
+                    Logger.Warn($"InitPermaBuffs(): Failed to apply PermaBuff {permaBuffProtoRef.GetName()} to player [{this}]");
+            }
+        }
+
+        private bool ApplyPermaBuff(PrototypeId permaBuffProtoRef)
+        {
+            PermaBuffPrototype permaBuffProto = permaBuffProtoRef.As<PermaBuffPrototype>();
+            if (permaBuffProto == null) return Logger.WarnReturn(false, "ApplyPermaBuff(): permaBuffProto == null");
+
+            if (permaBuffProto.EvalAvatarProperties == null)
+                return true;
+
+            using PropertyCollection tempProps = ObjectPoolManager.Instance.Get<PropertyCollection>();
+            
+            using EvalContextData evalContext = ObjectPoolManager.Instance.Get<EvalContextData>();
+            evalContext.SetVar_PropertyCollectionPtr(EvalContext.Default, tempProps);
+            Eval.RunBool(permaBuffProto.EvalAvatarProperties, evalContext);
+
+            PropertyInfoTable propInfoTable = GameDatabase.PropertyInfoTable;
+            foreach (var kvp in tempProps)
+            {
+                PropertyInfo propInfo = propInfoTable.LookupPropertyInfo(kvp.Key.Enum);
+
+                switch (propInfo.DataType)
+                {
+                    case PropertyDataType.Real:
+                        _permaBuffProperties.AdjustProperty((float)kvp.Value, kvp.Key);
+                        break;
+
+                    case PropertyDataType.Integer:
+                        _permaBuffProperties.AdjustProperty((int)kvp.Value, kvp.Key);
+                        break;
+
+                    default:
+                        Logger.Warn($"ApplyPermaBuff(): The following PermaBuff contains non-numeric property(ies), which is not currently supported!\nPermaBuff: [{permaBuffProtoRef.GetName()}]");
+                        break;
+                }
+            }
+
+            return true;
         }
 
         #endregion
@@ -3555,6 +4809,21 @@ namespace MHServerEmu.Games.Entities
             protected override CallbackDelegate GetCallback() => (t) => ((Player)t).DoCommunityBroadcast();
         }
 
+        private class CommunityPartyCircleChangedEvent : CallMethodEvent<Entity>
+        {
+            protected override CallbackDelegate GetCallback() => (t) => ((Player)t).OnPartyCircleChanged();
+        }
+
+        private class WorldViewUpdateEvent : CallMethodEvent<Entity>
+        {
+            protected override CallbackDelegate GetCallback() => (t) => ((Player)t).OnWorldViewUpdate();
+        }
+
+        private class TeleportToPartyMemberEvent : CallMethodEventParam1<Entity, ulong>
+        {
+            protected override CallbackDelegate GetCallback() => (t, p1) => ((Player)t).TeleportToPartyMember(p1);
+        }
+
         #endregion
 
         protected override void BuildString(StringBuilder sb)
@@ -3573,7 +4842,7 @@ namespace MHServerEmu.Games.Entities
             sb.AppendLine($"{nameof(_accountCreationTimestamp)}: {Clock.UnixTimeToDateTime(_accountCreationTimestamp)}");
             sb.AppendLine($"{nameof(_partyId)}: {_partyId}");
 
-            if (_guildId != GuildMember.InvalidGuildId)
+            if (_guildId != GuildManager.InvalidGuildId)
             {
                 sb.AppendLine($"{nameof(_guildId)}: {_guildId}");
                 sb.AppendLine($"{nameof(_guildName)}: {_guildName}");

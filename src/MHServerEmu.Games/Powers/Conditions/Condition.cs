@@ -733,6 +733,22 @@ namespace MHServerEmu.Games.Powers.Conditions
             _durationMS = duration < 0 ? 0 : duration;
         }
 
+        public void RunEvalPartyBoost()
+        {
+            EvalPrototype[] evals = _conditionPrototype?.EvalPartyBoost;
+            if (evals.HasValue() == false)
+                return;
+
+            using EvalContextData evalContext = ObjectPoolManager.Instance.Get<EvalContextData>();
+            evalContext.SetVar_PropertyCollectionPtr(EvalContext.Default, Properties);
+
+            foreach (EvalPrototype evalPartyBoost in evals)
+            {
+                if (Eval.RunBool(evalPartyBoost, evalContext) == false)
+                    Logger.Warn($"RunEvalPartyBoost(): EvalPartyBoost failed in condition [{this}]");
+            }
+        }
+
         public bool ShouldStartPaused(Region region)
         {
             if (IsPauseDurationCountdown())
@@ -760,6 +776,12 @@ namespace MHServerEmu.Games.Powers.Conditions
         {
             if (_conditionPrototype == null) return Logger.WarnReturn(false, "IsBoost(): _conditionPrototype == null");
             return _conditionPrototype.IsBoost;
+        }
+
+        public bool IsPartyBoost()
+        {
+            if (_conditionPrototype == null) return Logger.WarnReturn(false, "IsPartyBoost(): _conditionPrototype == null");
+            return _conditionPrototype.IsPartyBoost;
         }
 
         public bool IsHitReactCondition()
@@ -913,7 +935,7 @@ namespace MHServerEmu.Games.Powers.Conditions
             }
 
             // Assign proc properties
-            List<PrototypeId> procPowerRefList = ListPool<PrototypeId>.Instance.Get();
+            using var procPowerRefListHandle = ListPool<PrototypeId>.Instance.Get(out List<PrototypeId> procPowerRefList);
             foreach (var kvp in conditionProperties.IteratePropertyRange(Property.ProcPropertyTypesAll))
             {
                 Property.FromParam(kvp.Key, 1, out PrototypeId procPowerRef);
@@ -925,8 +947,6 @@ namespace MHServerEmu.Games.Powers.Conditions
                 conditionProperties[PropertyEnum.ProcPowerItemLevel, procPowerRef] = conditionProperties[PropertyEnum.ItemLevel];
                 conditionProperties[PropertyEnum.ProcPowerItemVariation, procPowerRef] = conditionProperties[PropertyEnum.ItemVariation];
             }
-
-            ListPool<PrototypeId>.Instance.Return(procPowerRefList);
 
             return success;
         }

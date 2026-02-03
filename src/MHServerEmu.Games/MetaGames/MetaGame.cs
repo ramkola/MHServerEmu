@@ -1,6 +1,8 @@
-﻿using MHServerEmu.Core.Extensions;
+﻿using Gazillion;
+using MHServerEmu.Core.Extensions;
 using MHServerEmu.Core.Logging;
 using MHServerEmu.Core.Memory;
+using MHServerEmu.Core.Network;
 using MHServerEmu.Core.Serialization;
 using MHServerEmu.Core.System.Random;
 using MHServerEmu.Core.System.Time;
@@ -30,19 +32,21 @@ namespace MHServerEmu.Games.MetaGames
         public static readonly Logger Logger = LogManager.CreateLogger();
         public static bool Debug = false;
 
-        protected RepString _name;
+        protected RepVar_string _name;
         protected ulong _regionId;
 
         public Region Region { get => GetRegion(); }
         public MetaGamePrototype MetaGamePrototype { get => Prototype as MetaGamePrototype; }
         public List<MetaState> MetaStates { get; }
-        protected List<MetaGameTeam> Teams { get; }
+        public List<MetaGameTeam> Teams { get; }
         protected List<MetaGameMode> GameModes { get; }
         public GRandom Random { get; }
         public MetaGameMode CurrentMode => (_modeIndex > -1 && _modeIndex < GameModes.Count) ? GameModes[_modeIndex] : null;
 
-        public IEnumerable<Player> Players { get => new PlayerIterator(GetRegion()); }
+        public PlayerIterator Players { get => new PlayerIterator(GetRegion()); }
         public UIDataProvider UIDataProvider { get => GetRegion()?.UIDataProvider; }
+
+        public MetaGameEventHandler EventHandler { get; private set; }
 
         private readonly HashSet<ulong> _discoveredEntities = new();
         private readonly Queue<ApplyStateRecord> _applyStateStack = new();
@@ -86,6 +90,7 @@ namespace MHServerEmu.Games.MetaGames
                 _metaStateSpawnEvents = new();
                 _regionId = region.Id;
                 region.RegisterMetaGame(this);
+                region.PlayerRegionChangeEvent.AddActionBack(_playerRegionChangeAction);
                 region.PlayerEnteredRegionEvent.AddActionBack(_playerEnteredRegionAction);
                 region.EntityEnteredWorldEvent.AddActionBack(_entityEnteredWorldAction);
                 region.EntityExitedWorldEvent.AddActionBack(_entityExitedWorldAction);
@@ -123,6 +128,7 @@ namespace MHServerEmu.Games.MetaGames
             var region = Region;
             if (region != null)
             {
+                EventHandler?.UnRegisterEvents();
                 region.PlayerRegionChangeEvent.RemoveAction(_playerRegionChangeAction);
                 region.PlayerEnteredRegionEvent.RemoveAction(_playerEnteredRegionAction);
                 region.EntityEnteredWorldEvent.RemoveAction(_entityEnteredWorldAction);
@@ -160,7 +166,7 @@ namespace MHServerEmu.Games.MetaGames
             }
         }
 
-        public MetaGameTeam CreateTeam(PrototypeId teamRef)
+        public virtual MetaGameTeam CreateTeam(PrototypeId teamRef)
         {
             var teamProto = GameDatabase.GetPrototype<MetaGameTeamPrototype>(teamRef);
             if (teamProto == null) return null;
@@ -232,8 +238,13 @@ namespace MHServerEmu.Games.MetaGames
             // deactivate old mode
             CurrentMode?.OnDeactivate();
 
-            // TODO modeProto.EventHandler
-            // TODO lock for proto.SoftLockRegionMode
+            InitializeEventHandler(modeProto.EventHandler);
+
+            int softLock = proto.SoftLockRegionMode;
+            if (softLock >= 0 && _modeIndex < softLock && softLock <= index)
+            {
+                SetSoftLockRegion(RegionPlayerAccess.Closed);
+            }
 
             _modeIndex = index;
             Random.Seed(region.RandomSeed + index);
@@ -243,6 +254,29 @@ namespace MHServerEmu.Games.MetaGames
 
             foreach (var player in Players)
                 player.Properties[PropertyEnum.PvPMode] = modeProto.DataRef;
+        }
+
+        public void SetSoftLockRegion(RegionPlayerAccess access)
+        {
+            ServiceMessage.SetRegionPlayerAccess message = new(Region.Id, (RegionPlayerAccessVar)access);
+            ServerManager.Instance.SendMessageToService(GameServiceType.PlayerManager, message);
+        }
+
+        private void InitializeEventHandler(PrototypeId eventHandlerRef)
+        {
+            if (eventHandlerRef == PrototypeId.Invalid) return;
+
+            if (EventHandler != null)
+            {
+                if (EventHandler.PrototypeRef == eventHandlerRef) return;
+                else EventHandler.UnRegisterEvents();
+            }
+
+            var eventHandlerProto = GameDatabase.GetPrototype<MetaGameEventHandlerPrototype>(eventHandlerRef);
+            if (eventHandlerProto is PvPScoreEventHandlerPrototype)
+                EventHandler = new PvPScoreEventHandler(this, eventHandlerProto);
+            else if (eventHandlerProto is PvEScoreEventHandlerPrototype)
+                EventHandler = new PvEScoreEventHandler(this, eventHandlerProto);
         }
 
         public void ScheduleActivateGameMode(PrototypeId modeRef)
@@ -471,17 +505,53 @@ namespace MHServerEmu.Games.MetaGames
         {
             var player = evt.Player;
             if (player == null) return;
+
+            DiscoverEntitiesForPlayer(player);
             AddPlayer(player);
         }
 
         public bool InitializePlayer(Player player)
         {
             if (Debug) Logger.Info($"InitializePlayer {player.Id}");
-            var team = GetTeamByPlayer(player);
-            // TODO crate team?
-            team?.AddPlayer(player);
 
-            return true;
+            var team = GetTeamByPlayer(player);
+            team ??= GetTeamForPlayer(player);
+
+            if (team != null) 
+                return team.AddPlayer(player);
+
+            return false;
+        }
+
+        public MetaGameTeam GetTeamForPlayer(Player player)
+        {
+            var transferParams = player.PlayerConnection?.TransferParams;
+            if (transferParams == null) return null;
+
+            MetaGameTeam team = null;
+            int index = transferParams.DestTeamIndex;
+
+            if (index >= 0 && index < Teams.Count)
+            {
+                team = Teams[index];
+            }
+            else
+            {
+                float bestRatio = float.MaxValue;
+                foreach (var currentTeam in Teams)
+                {
+                    if (currentTeam == null) continue;
+
+                    float fillRatio = (float)currentTeam.TeamSize / Math.Max(currentTeam.MaxPlayers, 1);
+                    if (fillRatio < bestRatio)
+                    {
+                        team = currentTeam;
+                        bestRatio = fillRatio;
+                    }
+                }
+            }
+
+            return team;
         }
 
         public bool UpdatePlayer(Player player, MetaGameTeam team)
@@ -558,12 +628,23 @@ namespace MHServerEmu.Games.MetaGames
             }
         }
 
-        private void DiscoverEntity(WorldEntity entity)
+        public void DiscoverEntity(WorldEntity entity)
         {
             if (entity.IsDiscoverable && _discoveredEntities.Contains(entity.Id) == false)
             {
                 _discoveredEntities.Add(entity.Id);
                 DiscoverEntityForPlayers(entity);
+            }
+        }
+
+        private void DiscoverEntitiesForPlayer(Player player)
+        {
+            var manager = Game.EntityManager;
+            foreach (var entityId in _discoveredEntities)
+            {
+                var entity = manager.GetEntity<WorldEntity>(entityId);
+                if (entity != null)
+                    player.DiscoverEntity(entity, true);
             }
         }
 

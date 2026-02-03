@@ -17,7 +17,7 @@ using MHServerEmu.Games.Powers.Conditions;
 using MHServerEmu.Games.Properties;
 using MHServerEmu.Games.Properties.Evals;
 using MHServerEmu.Games.Regions;
-using MHServerEmu.Games.Social;
+using MHServerEmu.Games.Social.Parties;
 
 namespace MHServerEmu.Games.Entities
 {
@@ -128,7 +128,7 @@ namespace MHServerEmu.Games.Entities
 
         public ReplicatedPropertyCollection Properties { get; } = new();
 
-        public Party Party { get; internal set; }
+        public Party Party { get => GetSelfOrOwnerOfType<Player>()?.GetParty(); }
         public virtual ulong PartyId { get { var ownerPlayer = GetOwnerOfType<Player>(); return ownerPlayer != null ? ownerPlayer.PartyId : 0; } }
 
         public EntityPrototype Prototype { get; private set; }
@@ -901,7 +901,7 @@ namespace MHServerEmu.Games.Entities
 
             Power.CopyPowerIndexProperties(indexProperties, modProperties);
 
-            List<PrototypeId> procPowerRefList = ListPool<PrototypeId>.Instance.Get();
+            using var procPowerRefListHandle = ListPool<PrototypeId>.Instance.Get(out List<PrototypeId> procPowerRefList);
             foreach (var kvp in modProperties.IteratePropertyRange(Property.ProcPropertyTypesAll))
             {
                 Property.FromParam(kvp.Key, 1, out PrototypeId procPowerRef);
@@ -910,8 +910,6 @@ namespace MHServerEmu.Games.Entities
 
             foreach (PrototypeId procPowerRef in procPowerRefList)
                 modProperties[PropertyEnum.ProcPowerRank, procPowerRef] = rank;
-
-            ListPool<PrototypeId>.Instance.Return(procPowerRefList);
 
             OnAttachedPropertiesPreAdd(modProperties);
             Properties.AddChildCollection(modProperties);
@@ -1205,6 +1203,18 @@ namespace MHServerEmu.Games.Entities
                 return true;
 
             return false;
+        }
+
+        public void TriggerInventoryCleanupEvent(InventoryEvent inventoryEvent)
+        {
+            if (inventoryEvent == InventoryEvent.Invalid)
+            {
+                Logger.Warn("TriggerInventoryCleanupEvent(): inventoryEvent == InventoryEvent.Invalid");
+                return;
+            }
+
+            foreach (Inventory inventory in new InventoryIterator(this))
+                inventory.TriggerCleanupEvent(inventoryEvent);
         }
 
         protected virtual bool InitInventories(bool populateInventories)

@@ -138,6 +138,13 @@ namespace MHServerEmu.Games.Properties
             return removed;
         }
 
+        public void SyncProperty(PropertyId id, out PropertyValue value)
+        {
+            // TODO: Figure out a way to fix mana getting out of sync properly and remove this kludge.
+            value = this[id];
+            MarkPropertyChanged(id, value, SetPropertyFlags.None);
+        }
+
         protected override bool SetPropertyValue(PropertyId id, PropertyValue value, SetPropertyFlags flags = SetPropertyFlags.None)
         {
             bool changed = base.SetPropertyValue(id, value, flags);
@@ -155,7 +162,7 @@ namespace MHServerEmu.Games.Properties
             if (interestFilter == AOINetworkPolicyValues.AOIChannelNone) return;
 
             // Check if any there are any interested clients
-            List<PlayerConnection> interestedClientList = ListPool<PlayerConnection>.Instance.Get();
+            using var interestedClientListHandle = ListPool<PlayerConnection>.Instance.Get(out List<PlayerConnection> interestedClientList);
             if (_messageDispatcher.GetInterestedClients(interestedClientList, interestFilter))
             {
                 // Send update to interested
@@ -168,8 +175,6 @@ namespace MHServerEmu.Games.Properties
 
                 _messageDispatcher.Game.NetworkManager.SendMessageToMultiple(interestedClientList, setPropertyMessage);
             }
-
-            ListPool<PlayerConnection>.Instance.Return(interestedClientList);
         }
 
         private void MarkPropertyRemoved(PropertyId id)
@@ -182,7 +187,7 @@ namespace MHServerEmu.Games.Properties
             if (interestFilter == AOINetworkPolicyValues.AOIChannelNone) return;
 
             // Check if any there are any interested clients
-            List<PlayerConnection> interestedClientList = ListPool<PlayerConnection>.Instance.Get();
+            using var interestedClientListHandle = ListPool<PlayerConnection>.Instance.Get(out List<PlayerConnection> interestedClientList);
             if (_messageDispatcher.GetInterestedClients(interestedClientList, interestFilter))
             {
                 // Send update to interested
@@ -194,8 +199,6 @@ namespace MHServerEmu.Games.Properties
 
                 _messageDispatcher.Game.NetworkManager.SendMessageToMultiple(interestedClientList, removePropertyMessage);
             }
-
-            ListPool<PlayerConnection>.Instance.Return(interestedClientList);
         }
     }
 }

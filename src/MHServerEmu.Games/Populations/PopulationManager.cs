@@ -289,7 +289,7 @@ namespace MHServerEmu.Games.Populations
 
                 if (markerEventScheduler.MissionSchedulers.Count > 0)
                 {
-                    List<SpawnMissionScheduler> missionSchedulers = ListPool<SpawnMissionScheduler>.Instance.Get();
+                    using var missionSchedulersHandle = ListPool<SpawnMissionScheduler>.Instance.Get(out List<SpawnMissionScheduler> missionSchedulers);
                     markerEventScheduler.GetSortedMissionSchedulers(missionSchedulers);
 
                     foreach (bool critical in Priority)
@@ -299,8 +299,6 @@ namespace MHServerEmu.Games.Populations
 
                     foreach (var scheduler in missionSchedulers)
                         scheduler.PushFailedObjects();
-
-                    ListPool<SpawnMissionScheduler>.Instance.Return(missionSchedulers);
                 }
 
                 if (markerEventScheduler.MarkerSchedulers.Count > 0)
@@ -349,6 +347,47 @@ namespace MHServerEmu.Games.Populations
             populationObject.SpawnObject(spawnTarget, entities);
         }
 
+        public void SpawnObjectUsePopulationMarker(PopulationObjectPrototype popObject, List<WorldEntity> entities)
+        {
+            if (popObject.UsePopulationMarker == PrototypeId.Invalid) return;
+
+            GRandom random = Game.Random;
+            SpawnTarget spawnTarget = new(Region);        
+            spawnTarget.Type = SpawnTargetType.Marker;
+
+            var spawnLocation = new SpawnLocation(Region);
+
+            PopulationObject populationObject = new()
+            {
+                MarkerRef = popObject.UsePopulationMarker,
+                Random = random,
+                Object = popObject,
+                SpawnLocation = spawnLocation,
+            };
+            populationObject.SpawnObject(spawnTarget, entities);
+        }
+
+        public void SpawnObjectUsePosition(PopulationObjectPrototype popObject, Vector3 position, List<WorldEntity> entities)
+        {
+            GRandom random = Game.Random;
+            SpawnTarget spawnTarget = new(Region)
+            {
+                Type = SpawnTargetType.Position,
+                Position = position
+            };
+
+            var spawnLocation = new SpawnLocation(Region);
+
+            PopulationObject populationObject = new()
+            {
+                Random = random,
+                Object = popObject,
+                SpawnFlags = SpawnFlags.RetryForce | SpawnFlags.RetryIgnoringBlackout,
+                SpawnLocation = spawnLocation,
+            };
+            populationObject.SpawnObject(spawnTarget, entities);
+        }
+
         #region BlackOutZone
 
         public void SpawnBlackOutZoneForGroup(SpawnGroup group, PrototypeId blackOutZone)
@@ -380,12 +419,12 @@ namespace MHServerEmu.Games.Populations
             }
         }
 
-        public IEnumerable<BlackOutZone> IterateBlackOutZoneInVolume<B>(B bound) where B : IBounds
+        public BlackOutSpatialPartition.ElementIterator<TVolume> IterateBlackOutZoneInVolume<TVolume>(TVolume volume) where TVolume : IBounds
         {
-            if (_blackOutSpatialPartition != null)
-                return _blackOutSpatialPartition.IterateElementsInVolume(bound);
-            else
-                return Enumerable.Empty<BlackOutZone>();
+            if (_blackOutSpatialPartition == null)
+                return default;
+
+            return _blackOutSpatialPartition.IterateElementsInVolume(volume);
         }
 
         public void InitializeSpacialPartition(in Aabb bound)
@@ -406,8 +445,12 @@ namespace MHServerEmu.Games.Populations
                     if (zone.MissionRef != missionRef)
                         return false;
             }
-            else if (IterateBlackOutZoneInVolume(sphere).Any() == false)
-                return false;
+            else
+            {
+                using var enumerator = IterateBlackOutZoneInVolume(sphere).GetEnumerator();
+                if (enumerator.MoveNext() == false)
+                    return false;
+            }
 
             return true;
         }

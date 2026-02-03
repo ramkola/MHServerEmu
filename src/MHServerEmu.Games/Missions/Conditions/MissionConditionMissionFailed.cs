@@ -112,14 +112,18 @@ namespace MHServerEmu.Games.Missions.Conditions
 
                 bool isParticipant = false;
                 bool isContributor = false;
-                List<Player> participants = ListPool<Player>.Instance.Get();
+                using var participantsHandle = ListPool<Player>.Instance.Get(out List<Player> participants);
                 mission.GetParticipants(participants);
 
-                var party = player.Party;
+                var party = player.GetParty();
                 if (party != null)
                 {
-                    foreach (Player member in party.GetMembers())
+                    foreach (var kvp in party)
                     {
+                        Player member = Game.Current.EntityManager.GetEntityByDbGuid<Player>(kvp.Key);
+                        if (member == null)
+                            continue;
+
                         isParticipant |= participants.Contains(member);
                         isContributor |= mission.GetContribution(member) > 0.0f;
                     }
@@ -132,8 +136,6 @@ namespace MHServerEmu.Games.Missions.Conditions
 
                 if (EvaluatePlayer(player, missionRef, isParticipant, isContributor))
                     UpdatePlayerContribution(player);
-
-                ListPool<Player>.Instance.Return(participants);
             }
 
             Count++;
