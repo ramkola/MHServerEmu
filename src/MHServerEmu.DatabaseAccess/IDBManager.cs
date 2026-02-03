@@ -28,9 +28,17 @@ namespace MHServerEmu.DatabaseAccess
         public bool TryQueryAccountByEmail(string email, out DBAccount account);
 
         /// <summary>
+        /// Queries the id of the player with the specified name.
+        /// </summary>
+        /// <remarks>
+        /// This query is case-insensitive, the playerNameOut argument should have proper case as stored in the database.
+        /// </remarks>
+        public bool TryGetPlayerDbIdByName(string playerName, out ulong playerDbId, out string playerNameOut);
+
+        /// <summary>
         /// Queries the name of the player with the specified id. Returns <see langword="true"/> if successful.
         /// </summary>
-        public bool TryGetPlayerName(ulong id, out string playerName);
+        public bool TryGetPlayerName(ulong playerDbId, out string playerName);
 
         /// <summary>
         /// Queries the names of all registered players from the database and adds them to the provided <see cref="Dictionary{TKey, TValue}"/>.
@@ -38,9 +46,9 @@ namespace MHServerEmu.DatabaseAccess
         public bool GetPlayerNames(Dictionary<ulong, string> playerNames);
 
         /// <summary>
-        /// Queries if the specified player name is already taken.
+        /// Queries last logout time for the player with the specified id. Returns <see langword="true"/> if successful.
         /// </summary>
-        public bool QueryIsPlayerNameTaken(string playerName);
+        public bool TryGetLastLogoutTime(ulong playerDbId, out long lastLogoutTime);
 
         /// <summary>
         /// Inserts a new <see cref="DBAccount"/> with all of its data into the database.
@@ -61,5 +69,30 @@ namespace MHServerEmu.DatabaseAccess
         /// Saves persistent game data stored in the database for the provided <see cref="DBAccount"/>.
         /// </summary>
         public bool SavePlayerData(DBAccount account);
+
+        /// <summary>
+        /// Loads <see cref="DBGuild"/> instances stored in the database and adds them to the provided <see cref="List{T}"/>.
+        /// </summary>
+        public bool LoadGuilds(List<DBGuild> guilds);
+
+        /// <summary>
+        /// Inserts or updates an existing <see cref="DBGuild"/> instance stored in the database.
+        /// </summary>
+        public bool SaveGuild(DBGuild guild);
+
+        /// <summary>
+        /// Deletes a stored <see cref="DBGuild"/> instance with all of its members from the database.
+        /// </summary>
+        public bool DeleteGuild(DBGuild guild);
+
+        /// <summary>
+        /// Inserts or updates an existing <see cref="DBGuildMember"/> instance stored in the database.
+        /// </summary>
+        public bool SaveGuildMember(DBGuildMember guildMember);
+
+        /// <summary>
+        /// Delets a store <see cref="DBGuildMember"/> instance from the database.
+        /// </summary>
+        public bool DeleteGuildMember(DBGuildMember guildMember);
     }
 }

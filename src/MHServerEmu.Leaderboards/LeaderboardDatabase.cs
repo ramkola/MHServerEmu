@@ -32,7 +32,7 @@ namespace MHServerEmu.Leaderboards
         private readonly Dictionary<PrototypeGuid, Leaderboard> _metaLeaderboards = new();
         private readonly Dictionary<ulong, string> _playerNames = new();
 
-        private readonly DoubleBufferQueue<GameServiceProtocol.LeaderboardScoreUpdateBatch> _scoreUpdateQueue = new();
+        private readonly DoubleBufferQueue<ServiceMessage.LeaderboardScoreUpdateBatch> _scoreUpdateQueue = new();
 
         public bool IsInitialized { get; private set; }
         public SQLiteLeaderboardDBManager DBManager { get; private set; }
@@ -95,13 +95,11 @@ namespace MHServerEmu.Leaderboards
         private bool LoadSchedule(string schedulePath, List<DBLeaderboard> updatedLeaderboards, List<DBLeaderboardInstance> updatedInstances)
         {
             // Load schedule
-            string scheduleJson = File.ReadAllText(schedulePath);
-
             LeaderboardScheduler[] schedulers;
 
             try
             {
-                schedulers = JsonSerializer.Deserialize<LeaderboardScheduler[]>(scheduleJson, LeaderboardScheduler.JsonSerializerOptions);
+                schedulers = FileHelper.DeserializeJson<LeaderboardScheduler[]>(schedulePath, LeaderboardScheduler.JsonSerializerOptions);
                 LeaderboardScheduler.ValidateMetaLeaderboards(schedulers);
             }
             catch (Exception e)
@@ -304,7 +302,7 @@ namespace MHServerEmu.Leaderboards
         /// </summary>
         private void SendLeaderboardsToGames()
         {
-            List<GameServiceProtocol.LeaderboardStateChange> instances = new();
+            List<ServiceMessage.LeaderboardStateChange> instances = new();
 
             foreach (var leaderboard in _leaderboards.Values)
                 leaderboard.GetInstanceInfos(instances);
@@ -312,7 +310,7 @@ namespace MHServerEmu.Leaderboards
             foreach (var leaderboard in _metaLeaderboards.Values)
                 leaderboard.GetInstanceInfos(instances);
 
-            GameServiceProtocol.LeaderboardStateChangeList message = new(instances);
+            ServiceMessage.LeaderboardStateChangeList message = new(instances);
             ServerManager.Instance.SendMessageToService(GameServiceType.GameInstance, message);
         }
 
@@ -568,15 +566,15 @@ namespace MHServerEmu.Leaderboards
         }
 
         /// <summary>
-        /// Enqueues a <see cref="GameServiceProtocol.LeaderboardScoreUpdateBatch"/> to be processed during the next update.
+        /// Enqueues a <see cref="ServiceMessage.LeaderboardScoreUpdateBatch"/> to be processed during the next update.
         /// </summary>
-        public void EnqueueLeaderboardScoreUpdate(in GameServiceProtocol.LeaderboardScoreUpdateBatch leaderboardScoreUpdateBatch)
+        public void EnqueueLeaderboardScoreUpdate(in ServiceMessage.LeaderboardScoreUpdateBatch leaderboardScoreUpdateBatch)
         {
             _scoreUpdateQueue.Enqueue(leaderboardScoreUpdateBatch);
         }
 
         /// <summary>
-        /// Processes queued <see cref="GameServiceProtocol.LeaderboardScoreUpdateBatch"/> instances.
+        /// Processes queued <see cref="ServiceMessage.LeaderboardScoreUpdateBatch"/> instances.
         /// </summary>
         public void ProcessLeaderboardScoreUpdateQueue()
         {
@@ -584,10 +582,10 @@ namespace MHServerEmu.Leaderboards
 
             while (_scoreUpdateQueue.CurrentCount > 0)
             {
-                GameServiceProtocol.LeaderboardScoreUpdateBatch batch = _scoreUpdateQueue.Dequeue();
+                ServiceMessage.LeaderboardScoreUpdateBatch batch = _scoreUpdateQueue.Dequeue();
                 for (int i = 0; i < batch.Count; i++)
                 {
-                    ref GameServiceProtocol.LeaderboardScoreUpdate update = ref batch[i];
+                    ref ServiceMessage.LeaderboardScoreUpdate update = ref batch[i];
                     Leaderboard leaderboard = GetLeaderboard((PrototypeGuid)update.LeaderboardId);
                     leaderboard?.OnScoreUpdate(ref update);
                 }
@@ -613,14 +611,12 @@ namespace MHServerEmu.Leaderboards
         /// </summary>
         public void UpdateState()
         {
-            List<Leaderboard> leaderboards = ListPool<Leaderboard>.Instance.Get();
+            using var leaderboardsHandle = ListPool<Leaderboard>.Instance.Get(out List<Leaderboard> leaderboards);
             GetLeaderboards(leaderboards);
 
             DateTime updateTime = Clock.UtcNowPrecise;
             foreach (Leaderboard leaderboard in leaderboards)
                 leaderboard.UpdateState(updateTime);
-
-            ListPool<Leaderboard>.Instance.Return(leaderboards);
         }
 
         /// <summary>
@@ -628,13 +624,11 @@ namespace MHServerEmu.Leaderboards
         /// </summary>
         public void Save()
         {
-            List<Leaderboard> leaderboards = ListPool<Leaderboard>.Instance.Get();
+            using var leaderboardsHandle = ListPool<Leaderboard>.Instance.Get(out List<Leaderboard> leaderboards);
             GetLeaderboards(leaderboards);
 
             foreach (var leaderboard in leaderboards)                
                 leaderboard.ActiveInstance?.SaveEntries(true);
-
-            ListPool<Leaderboard>.Instance.Return(leaderboards);
         }
 
         /// <summary>
@@ -642,22 +636,15 @@ namespace MHServerEmu.Leaderboards
         /// </summary>
         public LeaderboardInstance FindInstance(ulong instanceId)
         {
-            List<Leaderboard> leaderboards = ListPool<Leaderboard>.Instance.Get();
+            using var leaderboardsHandle = ListPool<Leaderboard>.Instance.Get(out List<Leaderboard> leaderboards);
             GetLeaderboards(leaderboards);
 
-            try
-            {
-                foreach (Leaderboard leaderboard in leaderboards)
-                    foreach (LeaderboardInstance instance in leaderboard.Instances)
-                        if (instance.InstanceId == instanceId)
-                            return instance;
+            foreach (Leaderboard leaderboard in leaderboards)
+                foreach (LeaderboardInstance instance in leaderboard.Instances)
+                    if (instance.InstanceId == instanceId)
+                        return instance;
 
-                return null;
-            }
-            finally
-            {
-                ListPool<Leaderboard>.Instance.Return(leaderboards);
-            }
+            return null;
         }
     }
 }

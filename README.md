@@ -6,8 +6,6 @@ The only currently supported version of the game client is **1.52.0.1700** (also
 
 We post development progress reports on our [blog](https://crypto137.github.io/MHServerEmu/). You can find additional information on various topics in the [documentation](./docs/Index.md). If you would like to discuss this project and/or help with its development, feel free to join our [Discord](https://discord.gg/hjR8Bj52t3).
 
-**Please make sure to read our [contribution guidelines](./CONTRIBUTING.md) if you would like to participate in the development of this project.**
-
 ## Download
 
 We provide two kinds of builds: stable and nightly.
@@ -34,19 +32,7 @@ You can always upgrade from stable to nightly simply by downloading the latest n
 
 ## Features
 
-MHServerEmu is feature-complete as a single player experience with limited multiplayer support. We are actively working on getting the remaining social features up and running, including:
-
-- Parties
-
-- Friends
-
-- Supergroups
-
-- Matchmaking
-
-- PvP
-
-- Trade Window
+MHServerEmu is currently feature-complete, but still in the polishing stage. All the major gameplay and social systems that existed in 2017 have been restored, and we are currently focusing on optimization and bug fixes. **Currently we aim to release version 1.0 in the first quarter of 2026.**
 
 You can find up to date information on what we are working on in [our roadmap](https://github.com/users/Crypto137/projects/5).
 
@@ -62,7 +48,7 @@ Download the latest stable or nightly build and overwrite your existing files. N
 
 **Will there be any wipes?**
 
-We plan to force a fresh start when version 1.0 comes out. Your data will not be deleted, but it will no longer be compatible with the server. You will be able to continue using your existing data on whatever the last 0.x version is going to be.
+We plan to force a fresh start when version 1.0 comes out in early 2026. Your data will not be deleted, but it will no longer be compatible with the server. You will be able to continue using your existing data on whatever the last 0.x version is going to be.
 
 **Are you going to support other versions of the game, like the ones from before the Biggest Update Ever (BUE) came out?**
 
@@ -72,7 +58,7 @@ Yes, we do plan to implement support for other versions of the game after 1.52 i
 
 The scope of this project is restoring the game to its original state. We do not have any plans to create custom content. However, all of our research on the game is completely open-source, and it can be potentially used by others in such endeavors.
 
-**Are you going to upgrade the game to Unreal Engine 5?**
+**Are you going to make improvements to the game client (e.g. upgrade graphics)?**
 
 No, we do not touch the client side of the game in any way. This project is a recreation of only the server backend needed to run the game.
 

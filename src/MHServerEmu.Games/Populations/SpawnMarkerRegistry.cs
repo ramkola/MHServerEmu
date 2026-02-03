@@ -1,6 +1,7 @@
 ﻿using MHServerEmu.Core.Collections;
 using MHServerEmu.Core.Collisions;
 using MHServerEmu.Core.Logging;
+using MHServerEmu.Core.Memory;
 using MHServerEmu.Core.System.Random;
 using MHServerEmu.Core.VectorMath;
 using MHServerEmu.Games.GameData;
@@ -63,12 +64,12 @@ namespace MHServerEmu.Games.Populations
             _reservationOctree = null;
         }
 
-        public IEnumerable<SpawnReservation> IterateReservationsInVolume<B>(B bound) where B : IBounds
+        public SpawnReservationSpatialPartition.ElementIterator<TVolume> IterateReservationsInVolume<TVolume>(TVolume volume) where TVolume : IBounds
         {
-            if (_reservationOctree != null)
-                return _reservationOctree.IterateElementsInVolume(bound);
-            else
-                return Enumerable.Empty<SpawnReservation>();
+            if (_reservationOctree == null)
+                return default;
+
+            return _reservationOctree.IterateElementsInVolume(volume);
         }
 
         public void InitializeSpacialPartition(in Aabb bound)
@@ -140,7 +141,7 @@ namespace MHServerEmu.Games.Populations
             if (_reservationOctree != null)
             {
                 SpawnReservation managedObject = spot;
-                if (managedObject != null && !managedObject.SpatialPartitionLocation.IsValid())
+                if (managedObject != null && !managedObject.SpatialPartitionLocation.IsValid)
                     _reservationOctree.Insert(managedObject);
             }
 
@@ -182,13 +183,13 @@ namespace MHServerEmu.Games.Populations
 
         public void RemoveCell(Cell cell)
         {
-            List<SpawnReservation> reservations = new();
+            using var reservationsHandle = ListPool<SpawnReservation>.Instance.Get(out List<SpawnReservation> reservations);
             GetReservationsInCell(cell.Id, reservations);
 
             foreach (SpawnReservation reservation in reservations)
             {
                 if (reservation == null || reservation.Cell != cell) continue;
-                if (_reservationOctree != null && reservation.SpatialPartitionLocation.IsValid()) _reservationOctree.Remove(reservation);
+                if (_reservationOctree != null && reservation.SpatialPartitionLocation.IsValid) _reservationOctree.Remove(reservation);
                 bool success = true;
                 success &= RemoveFromMasterVector(reservation);
                 success &= RemoveFromRegionLookup(reservation);
@@ -362,7 +363,8 @@ namespace MHServerEmu.Games.Populations
         {
             int cellId = pid / 1000;
             int markerId = pid % 1000;
-            List<SpawnReservation> reservations = new();
+            using var reservationsHandle = ListPool<SpawnReservation>.Instance.Get(out List<SpawnReservation> reservations);
+
             GetReservationsInCell((uint)cellId, reservations);
             foreach (var reservation in reservations)
                 if (reservation.Id == markerId) return reservation;
@@ -372,16 +374,24 @@ namespace MHServerEmu.Games.Populations
 
         public SpawnReservation GetReservationInCell(uint cellId, int id)
         {
-            List<SpawnReservation> reservations = new();
+            using var reservationsHandle = ListPool<SpawnReservation>.Instance.Get(out List<SpawnReservation> reservations);
+
             GetReservationsInCell(cellId, reservations);
             foreach (var reservation in reservations)
                 if (reservation.Id == id) return reservation;
             return null;
         }
 
+        public void GetPositionsByMarker(PrototypeId markerRef, List<Vector3> positions)
+        {
+            if (_regionLookup.TryGetValue(markerRef, out var list) && list != null)
+                foreach (var testReservation in list)
+                    positions.Add(testReservation.GetRegionPosition());
+        }
+
         public void OnSimulation(Cell cell, int numPlayers)
         {
-            List<SpawnReservation> reservations = new();
+            using var reservationsHandle = ListPool<SpawnReservation>.Instance.Get(out List<SpawnReservation> reservations);
 
             if (numPlayers == 0)
             {

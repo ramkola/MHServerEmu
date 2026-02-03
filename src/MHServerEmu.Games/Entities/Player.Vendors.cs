@@ -179,7 +179,12 @@ namespace MHServerEmu.Games.Entities
                 if (IsInGame == false)
                     settings.OptionFlags &= ~EntitySettingsOptionFlags.EnterGame;
 
-                item = entityManager.CreateEntity(settings) as Item;
+                Item clonedItem = entityManager.CreateEntity(settings) as Item;
+
+                if (clonedItem == null)
+                    return Logger.WarnReturn(false, $"BuyItemFromVendor(): Failed to clone item [{item}]");
+
+                item = clonedItem;
             }
 
             // Pay the cost of the item. We need to do this before we move the item because
@@ -339,6 +344,16 @@ namespace MHServerEmu.Games.Entities
 
             PrototypeId vendorTypeProtoRef = vendor.Properties[PropertyEnum.VendorType];
             if (vendorTypeProtoRef == PrototypeId.Invalid) return Logger.WarnReturn(false, "RefreshVendorInventory(): vendorTypeProtoRef == PrototypeId.Invalid");
+
+            return RefreshVendorInventoryInternal(vendorTypeProtoRef);
+        }
+
+        public bool RefreshVendorInventory(PrototypeId vendorTypeProtoRef)
+        {
+            if (vendorTypeProtoRef == PrototypeId.Invalid) return Logger.WarnReturn(false, "RefreshVendorInventory(): vendorTypeProtoRef == PrototypeId.Invalid");
+
+            if (CanRefreshVendorInventory(vendorTypeProtoRef, false) != VendorResult.RefreshSuccess)
+                return false;
 
             return RefreshVendorInventoryInternal(vendorTypeProtoRef);
         }
@@ -646,7 +661,7 @@ namespace MHServerEmu.Games.Entities
             if (vendorTypeProto.IsCrafter)
                 return true;
 
-            List<PrototypeId> inventoryList = ListPool<PrototypeId>.Instance.Get();
+            using var inventoryListHandle = ListPool<PrototypeId>.Instance.Get(out List<PrototypeId> inventoryList);
             vendorTypeProto.GetInventories(inventoryList);
 
             foreach (PrototypeId inventoryProtoRef in inventoryList)
@@ -655,7 +670,6 @@ namespace MHServerEmu.Games.Entities
                 purchaseData.Clear();
             }
 
-            ListPool<PrototypeId>.Instance.Return(inventoryList);
             return true;
         }
 
@@ -689,12 +703,12 @@ namespace MHServerEmu.Games.Entities
             if (isInitializing && _initializedVendorTypeProtoRefs.Add(vendorTypeProtoRef) == false)
                 return true;
 
-            List<PrototypeId> inventoryList = ListPool<PrototypeId>.Instance.Get();
-            HashSet<PrototypeId> craftingIngredientSet = HashSetPool<PrototypeId>.Instance.Get();
+            using var inventoryListHandle = ListPool<PrototypeId>.Instance.Get(out List<PrototypeId> inventoryList);
+            using var craftingIngredientSetHandle = HashSetPool<PrototypeId>.Instance.Get(out HashSet<PrototypeId> craftingIngredientSet);
 
             // Early return if there are no inventories to roll
             if (vendorTypeProto.GetInventories(inventoryList) == false)
-                goto end;
+                return true;
 
             // Get roll settings from properties
             int rollSeed = Properties[PropertyEnum.VendorRollSeed, vendorTypeProtoRef];
@@ -759,10 +773,12 @@ namespace MHServerEmu.Games.Entities
                     rollSettings.UsableAvatar = ((PrototypeId)Properties[PropertyEnum.VendorRollAvatar, vendorTypeProtoRef]).As<AvatarPrototype>();
                     rollSettings.Level = Properties[PropertyEnum.VendorRollLevel, vendorTypeProtoRef];
 
-                    // TODO: region keywords
                     Region region = GetRegion();
                     if (region != null)
+                    {
                         rollSettings.RegionScenarioRarity = region.Settings.ItemRarity;
+                        rollSettings.RegionKeywords = region.GetKeywordsMask();
+                    }
 
                     // Initialize resolver and roll
                     using ItemResolver resolver = ObjectPoolManager.Instance.Get<ItemResolver>();
@@ -892,9 +908,6 @@ namespace MHServerEmu.Games.Entities
             if (isInitializing == false)
                 SendMessage(NetMessageVendorRefresh.CreateBuilder().SetVendorTypeProtoId((ulong)vendorTypeProtoRef).Build());
 
-            end:
-            ListPool<PrototypeId>.Instance.Return(inventoryList);
-            HashSetPool<PrototypeId>.Instance.Return(craftingIngredientSet);
             return true;
         }
 

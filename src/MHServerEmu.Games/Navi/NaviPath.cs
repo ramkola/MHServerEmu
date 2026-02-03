@@ -297,20 +297,18 @@ namespace MHServerEmu.Games.Navi
 
         public static NaviPathResult CheckCanPathTo(NaviMesh naviMesh, Vector3 position, Vector3 goalPosition, float radius, PathFlags pathFlags)
         {
-            List<NaviPathNode> pathNodes = ListPool<NaviPathNode>.Instance.Get(MaxPathNodes);
+            using var pathNodesHandle = ListPool<NaviPathNode>.Instance.Get(MaxPathNodes, out List<NaviPathNode> pathNodes);
             var pathGen = new NaviPathGenerator(naviMesh);
             NaviPathResult result = pathGen.GeneratePath(position, goalPosition, radius, pathFlags, pathNodes, true, 0, 0f);
-            ListPool<NaviPathNode>.Instance.Return(pathNodes);
             return result;
         }
 
         public NaviPathResult GeneratePath(NaviMesh naviMesh, Vector3 position, Vector3 goalPosition, float radius, PathFlags pathFlags, PathGenerationFlags pathGenerationFlags, float incompleteDistance)
         {
-            List<NaviPathNode> pathNodes = ListPool<NaviPathNode>.Instance.Get(MaxPathNodes);
+            using var pathNodesHandle = ListPool<NaviPathNode>.Instance.Get(MaxPathNodes, out List<NaviPathNode> pathNodes);
             var generator = new NaviPathGenerator(naviMesh);
             NaviPathResult result = generator.GeneratePath(position, goalPosition, radius, pathFlags, pathNodes, false, pathGenerationFlags, incompleteDistance);
             Init(radius, pathFlags, pathNodes);
-            ListPool<NaviPathNode>.Instance.Return(pathNodes);
             return result;
         }
 
@@ -319,60 +317,51 @@ namespace MHServerEmu.Games.Navi
             if (waypoints.Count == 0 || waypoints[^1].Side != NaviSide.Point)
                 return NaviPathResult.Failed;
 
-            List<NaviPathNode> pathNodes = ListPool<NaviPathNode>.Instance.Get(MaxPathNodes);
-            List<NaviPathNode> wpPath = ListPool<NaviPathNode>.Instance.Get(MaxPathNodes);
+            using var pathNodesHandle = ListPool<NaviPathNode>.Instance.Get(MaxPathNodes, out List<NaviPathNode> pathNodes);
+            using var wpPathHandle = ListPool<NaviPathNode>.Instance.Get(MaxPathNodes, out List<NaviPathNode> wpPath);
 
             var startNode = new NaviPathNode(position, NaviSide.Point, 0f, false);
             var generator = new NaviPathGenerator(naviMesh);
             NaviPathResult result = NaviPathResult.Success;
 
-            try
+            foreach (var wp in waypoints)
             {
-                foreach (var wp in waypoints)
-                {
-                    if (!Vector3.IsFinite(wp.Point)
-                        || (wp.Side == NaviSide.Point && wp.Radius != 0f)
-                        || (wp.Side != NaviSide.Point && wp.Radius <= 0f))
-                        return NaviPathResult.Failed;
+                if (!Vector3.IsFinite(wp.Point)
+                    || (wp.Side == NaviSide.Point && wp.Radius != 0f)
+                    || (wp.Side != NaviSide.Point && wp.Radius <= 0f))
+                    return NaviPathResult.Failed;
 
-                    var pathNode = new NaviPathNode(wp.Point, wp.Side, wp.Radius, false);
-                    Segment pathSegment = GetPathSegment(pathNodes.Count > 0 ? pathNodes[^1] : startNode, pathNode);
-                    wpPath.Clear();
-                    result = generator.GeneratePath(pathSegment.Start, pathSegment.End, radius, pathFlags, wpPath, false, 0, 0f);
-                    if (result == NaviPathResult.Success)
-                    {
-                        if (pathNodes.Count + wpPath.Count > MaxPathNodes)
-                            return NaviPathResult.FailedOutMaxSize;
-
-                        if (wp.Side != NaviSide.Point)
-                            wpPath[^1] = pathNode;
-
-                        pathNodes.AddRange(wpPath);
-                    }
-                    else
-                        break;
-                }
-
-                Init(radius, pathFlags, null);
-
+                var pathNode = new NaviPathNode(wp.Point, wp.Side, wp.Radius, false);
+                Segment pathSegment = GetPathSegment(pathNodes.Count > 0 ? pathNodes[^1] : startNode, pathNode);
+                wpPath.Clear();
+                result = generator.GeneratePath(pathSegment.Start, pathSegment.End, radius, pathFlags, wpPath, false, 0, 0f);
                 if (result == NaviPathResult.Success)
-                    Append(pathNodes, 0);
+                {
+                    if (pathNodes.Count + wpPath.Count > MaxPathNodes)
+                        return NaviPathResult.FailedOutMaxSize;
 
-                return result;
+                    if (wp.Side != NaviSide.Point)
+                        wpPath[^1] = pathNode;
+
+                    pathNodes.AddRange(wpPath);
+                }
+                else
+                    break;
             }
-            finally
-            {
-                ListPool<NaviPathNode>.Instance.Return(pathNodes);
-                ListPool<NaviPathNode>.Instance.Return(wpPath);
-            }
+
+            Init(radius, pathFlags, null);
+
+            if (result == NaviPathResult.Success)
+                Append(pathNodes, 0);
+
+            return result;
         }
 
         public NaviPathResult GenerateSimpleMove(Vector3 position, Vector3 goalPosition, float radius, PathFlags pathFlags)
         {
-            List<NaviPathNode> pathNodes = ListPool<NaviPathNode>.Instance.Get(MaxPathNodes);
+            using var pathNodesHandle = ListPool<NaviPathNode>.Instance.Get(MaxPathNodes, out List<NaviPathNode> pathNodes);
             NaviPathGenerator.GenerateDirectMove(position, goalPosition, pathNodes);
             Init(radius, pathFlags, pathNodes);
-            ListPool<NaviPathNode>.Instance.Return(pathNodes);
             return NaviPathResult.Success;
         }
 

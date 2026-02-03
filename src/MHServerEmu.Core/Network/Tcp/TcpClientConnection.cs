@@ -1,7 +1,7 @@
 ﻿using System.Net;
 using System.Net.Sockets;
 using MHServerEmu.Core.Config;
-using MHServerEmu.Core.Extensions;
+using MHServerEmu.Core.Helpers;
 using MHServerEmu.Core.Logging;
 
 namespace MHServerEmu.Core.Network.Tcp
@@ -37,10 +37,13 @@ namespace MHServerEmu.Core.Network.Tcp
 
         public override string ToString()
         {
-            if (HideSensitiveInformation)
-                return RemoteEndPoint?.ToStringMasked();
+            if (RemoteEndPoint == null)
+                return "NULL";
 
-            return RemoteEndPoint?.ToString();
+            if (HideSensitiveInformation)
+                return $"0x{HashHelper.Djb2(RemoteEndPoint.Address.ToString()):X8}";
+
+            return RemoteEndPoint.ToString();
         }
 
         /// <summary>

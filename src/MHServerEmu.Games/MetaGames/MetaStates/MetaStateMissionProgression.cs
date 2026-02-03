@@ -1,5 +1,6 @@
 using MHServerEmu.Core.Extensions;
 using MHServerEmu.Core.Memory;
+using MHServerEmu.Games.Entities;
 using MHServerEmu.Games.Events;
 using MHServerEmu.Games.Events.Templates;
 using MHServerEmu.Games.GameData;
@@ -20,6 +21,7 @@ namespace MHServerEmu.Games.MetaGames.MetaStates
         private EventPointer<PlayerDeathLimitEvent> _playerDeathLimitEvent = new();
         private PrototypeId _stateRef;
         private PrototypeId _lastStateRef;
+        public PrototypeId GetCurrentStateRef() => _stateRef;
 
         public MetaStateMissionProgression(MetaGame metaGame, MetaStatePrototype prototype) : base(metaGame, prototype)
         {
@@ -155,8 +157,11 @@ namespace MHServerEmu.Games.MetaGames.MetaStates
 
         private void TeleportPlayersToStart()
         {
-            var players = MetaGame.Players;
-            foreach (var player in players.ToArray())   // FIXME: Use pooled list here
+            using var playersHandle = ListPool<Player>.Instance.Get(out List<Player> players);
+            foreach (Player player in MetaGame.Players)
+                players.Add(player);
+
+            foreach (var player in players)
             {
                 var avatar = player.CurrentAvatar;
                 if (avatar == null) continue;
@@ -193,7 +198,7 @@ namespace MHServerEmu.Games.MetaGames.MetaStates
             _stateIntervalEvent.Get().Initialize(this);
         }
 
-        private void OnStateInterval()
+        public void OnStateInterval()
         {
             var region = Region;
             if (region == null) return;

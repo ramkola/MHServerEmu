@@ -16,6 +16,7 @@ using MHServerEmu.Games.GameData;
 using MHServerEmu.Games.GameData.Calligraphy;
 using MHServerEmu.Games.GameData.LiveTuning;
 using MHServerEmu.Games.GameData.Prototypes;
+using MHServerEmu.Games.MetaGames;
 using MHServerEmu.Games.Powers.Conditions;
 using MHServerEmu.Games.Properties;
 using MHServerEmu.Games.Properties.Evals;
@@ -288,8 +289,7 @@ namespace MHServerEmu.Games.Powers
         /// </summary>
         public void IncrementHitCount(ulong targetId)
         {
-            _hitCountDict.TryGetValue(targetId, out int count);
-            _hitCountDict[targetId] = ++count;
+            _hitCountDict.GetValueRefOrAddDefault(targetId)++;
         }
 
         /// <summary>
@@ -1043,6 +1043,8 @@ namespace MHServerEmu.Games.Powers
             target.TryActivateOnGotDamagedProcs(ProcTriggerType.OnGotDamagedPriorResist, results, healthDelta);
 
             // Apply other modifiers
+            CalculateResultDamagePvPBoost(results, target);
+
             CalculateResultDamageSplitBetweenTargets(results);
 
             CalculateResultDamagePvPScaling(results, target);
@@ -1068,6 +1070,8 @@ namespace MHServerEmu.Games.Powers
             CalculateResultDamageConversion(results, target, difficultyMult);
 
             CalculateResultDamageMetaGameModifier(results, target);
+
+            CalculateResultDamagePvPReduction(results, target);
 
             CalculateResultDamageLevelScaling(results, target, difficultyMult);
 
@@ -1373,6 +1377,47 @@ namespace MHServerEmu.Games.Powers
                 distanceBonusMult = 1f - distanceBonusMult;
 
             value += maxDistanceBonus * distanceBonusMult;
+        }
+
+        private bool CalculateResultDamagePvPBoost(PowerResults results, WorldEntity target)
+        {
+            Region region = target.Region;
+            if (region == null) return Logger.WarnReturn(false, "CalculateResultDamagePvPBoost(): region == null");
+
+            PvP pvp = region.GetPvPMatch();
+            if (pvp == null)
+                return true;
+
+            // This is dumb and should probably never be enabled.
+            if (Game.CustomGameOptions.ApplyHiddenPvPDamageModifiers == false)
+                return true;
+
+            // Only avatar-originating damage gets boosted in PvP.
+            Avatar avatar = Game.EntityManager.GetEntity<Avatar>(UltimateOwnerId);
+            if (avatar == null)
+                return true;
+
+            PvPPrototype pvpProto = pvp.PvPPrototype;
+            PropertyCollection avatarProps = avatar.Properties;
+
+            float boostPct = 1f;
+
+            boostPct += pvpProto.GetDamageBoostForKDPct(avatarProps[PropertyEnum.PvPRecentKDRatio]);
+            boostPct += pvpProto.GetDamageBoostForNoobs(avatarProps[PropertyEnum.PvPMatchCount]);
+            boostPct += pvpProto.GetDamageBoostForWinPct(avatarProps[PropertyEnum.PvPRecentWinLossRatio]);
+
+            if (Game.InfinitySystemEnabled == false)
+            {
+                Player player = avatar.GetOwnerOfType<Player>();
+                if (player != null)
+                {
+                    float omegaPct = (float)player.GetOmegaPoints() / GameDatabase.AdvancementGlobalsPrototype.OmegaPointsCap;
+                    boostPct += pvpProto.GetDamageBoostForOmegaPct(omegaPct);
+                }
+            }
+
+            ApplyDamageMultiplier(results.Properties, boostPct);
+            return true;
         }
 
         private bool CalculateResultDamageSplitBetweenTargets(PowerResults results)
@@ -1750,7 +1795,7 @@ namespace MHServerEmu.Games.Powers
             if (conditionCollection == null)
                 return true;
 
-            List<ulong> conditionCheckList = ListPool<ulong>.Instance.Get();
+            using var conditionCheckListHandle = ListPool<ulong>.Instance.Get(out List<ulong> conditionCheckList);
 
             foreach (Condition condition in conditionCollection.IterateConditions(true))
             {
@@ -1804,7 +1849,6 @@ namespace MHServerEmu.Games.Powers
                     results.AddConditionToRemove(condition.Id);
             }
 
-            ListPool<ulong>.Instance.Return(conditionCheckList);
             return true;
         }
 
@@ -1843,6 +1887,46 @@ namespace MHServerEmu.Games.Powers
             }
 
             ApplyDamageMultiplier(results.Properties, metaGameMult);
+            return true;
+        }
+
+        private bool CalculateResultDamagePvPReduction(PowerResults results, WorldEntity target)
+        {
+            Region region = target.Region;
+            if (region == null) return Logger.WarnReturn(false, "CalculateResultDamagePvPBoost(): region == null");
+
+            PvP pvp = region.GetPvPMatch();
+            if (pvp == null)
+                return true;
+
+            // This is dumb and should probably never be enabled.
+            if (Game.CustomGameOptions.ApplyHiddenPvPDamageModifiers == false)
+                return true;
+
+            Avatar avatar = target.GetSelfOrOwnerOfType<Avatar>();
+            if (avatar == null)
+                return true;
+
+            PvPPrototype pvpProto = pvp.PvPPrototype;
+            PropertyCollection avatarProps = avatar.Properties;
+
+            float damageReduction = 1f;
+
+            damageReduction *= pvpProto.GetDamageReductionForKDPct(avatarProps[PropertyEnum.PvPRecentKDRatio]);
+            damageReduction *= pvpProto.GetDamageReductionForNoobs(avatarProps[PropertyEnum.PvPMatchCount]);
+            damageReduction *= pvpProto.GetDamageReductionForWinPct(avatarProps[PropertyEnum.PvPRecentWinLossRatio]);
+
+            if (Game.InfinitySystemEnabled == false)
+            {
+                Player player = avatar.GetOwnerOfType<Player>();
+                if (player != null)
+                {
+                    float omegaPct = (float)player.GetOmegaPoints() / GameDatabase.AdvancementGlobalsPrototype.OmegaPointsCap;
+                    damageReduction *= pvpProto.GetDamageReductionForOmegaPct(omegaPct);
+                }
+            }
+
+            ApplyDamageMultiplier(results.Properties, damageReduction);
             return true;
         }
 
@@ -1895,12 +1979,21 @@ namespace MHServerEmu.Games.Powers
             transferredDamageTotal.Clear();
 
             // Apply damage transfer from conditions
+            using var damageTransferConditionsHandle = ListPool<(ulong, Condition)>.Instance.Get(out List<(ulong, Condition)> damageTransferConditions);
+            
+            // Applying damage transfer can cause a chain reaction that will modify conditions on the target,
+            // so put damage transfer conditions into a temporary list for iteration.
             foreach (Condition condition in target.ConditionCollection)
             {
                 ulong transferTargetId = condition.Properties[PropertyEnum.DamageTransferID];
                 if (transferTargetId == Entity.InvalidId)
                     continue;
 
+                damageTransferConditions.Add((transferTargetId, condition));
+            }
+
+            foreach ((ulong transferTargetId, Condition condition) in damageTransferConditions)
+            {
                 // Transferring to itself can cause a loop
                 if (transferTargetId == target.Id)
                 {
@@ -2206,7 +2299,7 @@ namespace MHServerEmu.Games.Powers
 
         private void CalculateResultNegativeStatusRemoval(PowerResults results, WorldEntity target)
         {
-            List<ulong> negativeStatusConditionsToRemove = ListPool<ulong>.Instance.Get();
+            using var negativeStatusConditionsToRemoveHandle = ListPool<ulong>.Instance.Get(out List<ulong> negativeStatusConditionsToRemove);
             ConditionCollection conditionCollection = target.ConditionCollection;
 
             float negStatusClearChancePctAll = Properties[PropertyEnum.PowerClearsNegStatusChancePctAll];
@@ -2243,8 +2336,6 @@ namespace MHServerEmu.Games.Powers
 
             foreach (ulong conditionId in negativeStatusConditionsToRemove)
                 results.AddConditionToRemove(conditionId);
-
-            ListPool<ulong>.Instance.Return(negativeStatusConditionsToRemove);
         }
 
         private bool CalculateResultConditionDuration(PowerResults results, WorldEntity target, WorldEntity owner, bool calculateForTarget,
@@ -2302,7 +2393,7 @@ namespace MHServerEmu.Games.Powers
                 {
                     bool canApply = true;
 
-                    List<PrototypeId> negativeStatusList = ListPool<PrototypeId>.Instance.Get();
+                    using var negativeStatusListHandle = ListPool<PrototypeId>.Instance.Get(out List<PrototypeId> negativeStatusList);
                     if (Condition.IsANegativeStatusEffect(conditionProperties, negativeStatusList))
                     {
                         if (CanApplyConditionToTarget(target, conditionProperties, negativeStatusList) == false)
@@ -2312,7 +2403,6 @@ namespace MHServerEmu.Games.Powers
                         }
                     }
 
-                    ListPool<PrototypeId>.Instance.Return(negativeStatusList);
                     if (canApply == false)
                         return false;
                 }
@@ -2344,7 +2434,6 @@ namespace MHServerEmu.Games.Powers
             PowerPrototype powerProto = PowerPrototype;
             if (powerProto == null) return Logger.WarnReturn(false, "CalculateResultConditionExtraProperties(): powerProto == null");
 
-            // TODO: Add more properties to set
             PropertyCollection conditionProps = condition.Properties;
 
             // NoEntityCollideException
@@ -2365,6 +2454,22 @@ namespace MHServerEmu.Games.Powers
             // Damage Transfer
             if (conditionProps[PropertyEnum.DamageTransferChance] > 0f)
                 conditionProps[PropertyEnum.DamageTransferID] = PowerOwnerId;
+
+            // InformsHitInfoToAlly
+            if (conditionProps[PropertyEnum.InformsHitInfoToAlly])
+            {
+                // This appears to be unused, log this in case it somehow pops up somewhere.
+                Logger.Debug($"CalculateResultConditionExtraProperties(): InformsHitInfoToAlly on target [{target}]");
+                conditionProps[PropertyEnum.InformsHitInfoToAllyId] = UltimateOwnerId;
+            }
+
+            // TargetedCritBonus
+            if (conditionProps[PropertyEnum.TargetedCritBonus] > 0f)
+                conditionProps[PropertyEnum.TargetedCritBonusId] = UltimateOwnerId;
+
+            // XPTransfer
+            if (conditionProps[PropertyEnum.XPTransfer])
+                conditionProps[PropertyEnum.XPTransferToID] = UltimateOwnerId;
 
             // Procs
             CalculateResultConditionProcProperties(results, target, condition.Properties);
@@ -2454,7 +2559,7 @@ namespace MHServerEmu.Games.Powers
         private void CalculateResultConditionProcProperties(PowerResults results, WorldEntity target, PropertyCollection conditionProperties)
         {
             // Store properties to set in a temporary dictionary to avoid modifying property collections during iteration
-            Dictionary<PropertyId, PropertyValue> propertiesToSet = DictionaryPool<PropertyId, PropertyValue>.Instance.Get();
+            using var propertiesToSetHandle = DictionaryPool<PropertyId, PropertyValue>.Instance.Get(out Dictionary<PropertyId, PropertyValue> propertiesToSet);
 
             // Triggering refs and ranks
             int rank = conditionProperties[PropertyEnum.PowerRank];
@@ -2488,8 +2593,6 @@ namespace MHServerEmu.Games.Powers
             // Set properties
             foreach (var kvp in propertiesToSet)
                 conditionProperties[kvp.Key] = kvp.Value;
-
-            DictionaryPool<PropertyId, PropertyValue>.Instance.Return(propertiesToSet);
         }
 
         private bool CalculateResultConditionsToRemove(PowerResults results, WorldEntity target)
@@ -3019,19 +3122,19 @@ namespace MHServerEmu.Games.Powers
             PropertyCollection targetProperties = target.Properties;
 
             // Do not resist conditions without negative status effects
-            List<PrototypeId> negativeStatusList = ListPool<PrototypeId>.Instance.Get();
+            using var negativeStatusListHandle = ListPool<PrototypeId>.Instance.Get(out List<PrototypeId> negativeStatusList);
             if (Condition.IsANegativeStatusEffect(conditionProperties, negativeStatusList) == false)
-                goto end;
+                return;
 
             // Do not resist if the condition ignores resists and the target isn't immune to resist ignores
             if (conditionProperties[PropertyEnum.IgnoreNegativeStatusResist] && targetProperties[PropertyEnum.CCAlwaysCheckResist] == false)
-                goto end;
+                return;
 
             // Check for immunities
             if (CanApplyConditionToTarget(target, conditionProperties, negativeStatusList) == false)
             {
                 duration = TimeSpan.Zero;
-                goto end;
+                return;
             }
 
             // Calculate and apply CCResistScore (tenacity)
@@ -3061,9 +3164,6 @@ namespace MHServerEmu.Games.Powers
 
             // Apply StatusResistByDuration properties
             ApplyStatusResistByDuration(target, conditionProto, conditionProperties, ref duration);
-
-            end:
-            ListPool<PrototypeId>.Instance.Return(negativeStatusList);
         }
 
         /// <summary>
@@ -3213,8 +3313,8 @@ namespace MHServerEmu.Games.Powers
 
             if (stackId.PrototypeRef == PrototypeId.Invalid) return Logger.WarnReturn(0, "CalculateConditionNumStacksToApply(): stackId.PrototypeRef == PrototypeId.Invalid");
 
-            List<ulong> refreshList = ListPool<ulong>.Instance.Get();
-            List<ulong> removeList = ListPool<ulong>.Instance.Get();
+            using var refreshListHandle = ListPool<ulong>.Instance.Get(out List<ulong> refreshList);
+            using var removeListHandle = ListPool<ulong>.Instance.Get(out List<ulong> removeList);
 
             int numStacksToApply = conditionCollection.GetStackApplicationData(stackId, stackingBehaviorProto,
                 Properties[PropertyEnum.PowerRank], out TimeSpan longestTimeRemaining, removeList, refreshList);
@@ -3263,8 +3363,6 @@ namespace MHServerEmu.Games.Powers
             if (applicationStyle == StackingApplicationStyleType.MultiStackAddDuration)
                 duration += longestTimeRemaining;
 
-            ListPool<ulong>.Instance.Return(refreshList);
-            ListPool<ulong>.Instance.Return(removeList);
             return numStacksToApply;
         }
 

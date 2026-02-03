@@ -1,10 +1,12 @@
 ﻿using System.Text;
-using Gazillion;
 using MHServerEmu.Commands.Attributes;
 using MHServerEmu.Core.Logging;
 using MHServerEmu.Core.Network;
 using MHServerEmu.DatabaseAccess.Models;
 using MHServerEmu.Games.GameData.LiveTuning;
+using MHServerEmu.Games.MTXStore;
+using MHServerEmu.PlayerManagement.Players;
+using MHServerEmu.WebFrontend;
 
 namespace MHServerEmu.Commands.Implementations
 {
@@ -22,7 +24,7 @@ namespace MHServerEmu.Commands.Implementations
             StringBuilder sb = new();
             sb.AppendLine("Server Status");
             sb.AppendLine(ServerApp.VersionInfo);
-            sb.Append(ServerManager.Instance.GetServerStatus(client == null));
+            sb.Append(ServerManager.Instance.GetServerStatusString());
             string status = sb.ToString();
 
             // Display in the console as is
@@ -41,13 +43,10 @@ namespace MHServerEmu.Commands.Implementations
         [CommandParamCount(1)]
         public string Broadcast(string[] @params, NetClient client)
         {
-            var groupingManager = ServerManager.Instance.GetGameService(GameServiceType.GroupingManager) as IMessageBroadcaster;
-            if (groupingManager == null) return "Failed to connect to the grouping manager.";
+            string notificationText = string.Join(' ', @params);
 
-            string message = string.Join(' ', @params);
-
-            groupingManager.BroadcastMessage(ChatServerNotification.CreateBuilder().SetTheMessage(message).Build());
-            Logger.Trace($"Broadcasting server notification: \"{message}\"");
+            ServiceMessage.GroupingManagerServerNotification message = new(notificationText);
+            ServerManager.Instance.SendMessageToService(GameServiceType.GroupingManager, message);
 
             return string.Empty;
         }
@@ -60,6 +59,49 @@ namespace MHServerEmu.Commands.Implementations
         public string ReloadLiveTuning(string[] @params, NetClient client)
         {
             LiveTuningManager.Instance.LoadLiveTuningDataFromDisk();
+            return string.Empty;
+        }
+
+        [Command("reloadcatalog")]
+        [CommandDescription("Reloads MTX store catalog.")]
+        [CommandUsage("server reloadcatalog")]
+        [CommandUserLevel(AccountUserLevel.Admin)]
+        [CommandInvokerType(CommandInvokerType.ServerConsole)]
+        public string ReloadCatalog(string[] @params, NetClient client)
+        {
+            CatalogManager.Instance.LoadEntries();
+            return string.Empty;
+        }
+
+        [Command("reloaddashboard")]
+        [CommandDescription("Reloads the web dashboard.")]
+        [CommandUserLevel(AccountUserLevel.Admin)]
+        [CommandInvokerType(CommandInvokerType.ServerConsole)]
+        public string ReloadDashboard(string[] @params, NetClient client)
+        {
+            WebFrontendService webFrontend = ServerManager.Instance.GetGameService(GameServiceType.WebFrontend) as WebFrontendService;
+            webFrontend?.ReloadDashboard();
+            return string.Empty;
+        }
+
+        [Command("reloadaddg")]
+        [CommandDescription("Reloads the Add G page.")]
+        [CommandUserLevel(AccountUserLevel.Admin)]
+        [CommandInvokerType(CommandInvokerType.ServerConsole)]
+        public string ReloadAddG(string[] @params, NetClient client)
+        {
+            WebFrontendService webFrontend = ServerManager.Instance.GetGameService(GameServiceType.WebFrontend) as WebFrontendService;
+            webFrontend?.ReloadAddGPage();
+            return string.Empty;
+        }
+
+        [Command("reloadplayernameblacklist")]
+        [CommandDescription("Reloads the player name blacklist.")]
+        [CommandUserLevel(AccountUserLevel.Admin)]
+        [CommandInvokerType(CommandInvokerType.ServerConsole)]
+        public string ReloadPlayerNameBlacklist(string[] @params, NetClient client)
+        {
+            PlayerNameValidator.Instance.Initialize();
             return string.Empty;
         }
 

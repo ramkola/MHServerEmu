@@ -54,7 +54,8 @@ namespace MHServerEmu.Games.Entities.Physics
 
             SwapCurrentForceReadWriteIndices();
             ApplyForceSystems();
-            PhysicsContext physicsContext = new();
+
+            using PhysicsContext physicsContext = new();
             ResolveEntitiesAllowPenetration(physicsContext, _entitiesResolving);
             ResolveEntitiesOverlapState(physicsContext);
 
@@ -64,7 +65,7 @@ namespace MHServerEmu.Games.Entities.Physics
                 region.ClearCollidedEntities();
         }
 
-        private void ResolveEntitiesOverlapState(PhysicsContext physicsContext)
+        private void ResolveEntitiesOverlapState(in PhysicsContext physicsContext)
         {
             var entityManager = _game.EntityManager;
 
@@ -88,19 +89,25 @@ namespace MHServerEmu.Games.Entities.Physics
             {
                 var entityPhysics = worldEntity.Physics;
                 var manager = _game.EntityManager;
-                foreach (var overlappedEntry in entityPhysics.OverlappedEntities.ToArray())
+
+                using var overlappedEntitiesHandle = ListPool<KeyValuePair<ulong, OverlapEntityEntry>>.Instance.Get(out var overlappedEntities);
+                overlappedEntities.AddRange(entityPhysics.OverlappedEntities);
+
+                foreach (var overlappedEntry in overlappedEntities)
+                {
                     if (overlappedEntry.Value.Frame != _physicsFrames)
                     {
                         var overlappedEntity = manager.GetEntity<WorldEntity>(overlappedEntry.Key);
                         if (overlappedEntity != null)
-                            overlapEvents.Enqueue(new (OverlapEventType.Remove, worldEntity, overlappedEntity));
+                            overlapEvents.Enqueue(new(OverlapEventType.Remove, worldEntity, overlappedEntity));
                         else
                             entityPhysics.OverlappedEntities.Remove(overlappedEntry.Key);
                     }
+                }
             }
         }
 
-        private void ResolveEntitiesAllowPenetration(PhysicsContext physicsContext, List<ulong> entitiesResolving)
+        private void ResolveEntitiesAllowPenetration(in PhysicsContext physicsContext, List<ulong> entitiesResolving)
         {
             if (_game == null) return;
             RegionManager regionManager = _game.RegionManager;
@@ -141,11 +148,11 @@ namespace MHServerEmu.Games.Entities.Physics
             }
         }
 
-        private void UpdateAttachedEntityPositions(PhysicsContext physicsContext, WorldEntity parentEntity)
+        private void UpdateAttachedEntityPositions(in PhysicsContext physicsContext, WorldEntity parentEntity)
         {
             if (parentEntity == null) return;
 
-            List<ulong> attachedEntities = ListPool<ulong>.Instance.Get();
+            using var attachedEntitiesHandle = ListPool<ulong>.Instance.Get(out List<ulong> attachedEntities);
             if (parentEntity.Physics.GetAttachedEntities(attachedEntities))
             {
                 Vector3 parentEntityPosition = parentEntity.RegionLocation.Position;
@@ -171,7 +178,6 @@ namespace MHServerEmu.Games.Entities.Physics
                     }
                 }
             }
-            ListPool<ulong>.Instance.Return(attachedEntities);
         }
 
         private void ApplyForceSystems()
@@ -228,7 +234,7 @@ namespace MHServerEmu.Games.Entities.Physics
             if (_game == null || entity == null || entity.IsInWorld == false || entity.TestStatus(EntityStatus.Destroyed))
                 return false;
 
-            List<EntityCollision> entityCollisionList = ListPool<EntityCollision>.Instance.Get();
+            using var entityCollisionListHandle = ListPool<EntityCollision>.Instance.Get(out List<EntityCollision> entityCollisionList);
             bool moved = false;
 
             if (Vector3.IsNearZero(vector))
@@ -236,11 +242,7 @@ namespace MHServerEmu.Games.Entities.Physics
             else
             {
                 var locomotor = entity.Locomotor;
-                if (locomotor == null)
-                {
-                    ListPool<EntityCollision>.Instance.Return(entityCollisionList);
-                    return Logger.WarnReturn(false, "MoveEntity(): locomotor == null");
-                }
+                if (locomotor == null) return Logger.WarnReturn(false, "MoveEntity(): locomotor == null");
 
                 bool noMissile = locomotor.IsMissile == false;
                 bool sliding = noMissile && moveFlags.HasFlag(MoveEntityFlags.Sliding);
@@ -280,7 +282,6 @@ namespace MHServerEmu.Games.Entities.Physics
                 }
             }
 
-            ListPool<EntityCollision>.Instance.Return(entityCollisionList);
             return moved;
         }
 
@@ -439,7 +440,7 @@ namespace MHServerEmu.Games.Entities.Physics
             Aabb bound = entity.EntityCollideBounds.ToAabb();            
             Vector3 position = entity.RegionLocation.Position;
 
-            List<WorldEntity> collisions = ListPool<WorldEntity>.Instance.Get();
+            using var collisionsHandle = ListPool<WorldEntity>.Instance.Get(out List<WorldEntity> collisions);
             var context = entity.GetEntityRegionSPContext();
             foreach (var otherEntity in region.IterateEntitiesInVolume(bound, context))
                 if (entity != otherEntity)
@@ -450,8 +451,6 @@ namespace MHServerEmu.Games.Entities.Physics
                 EntityCollision entityCollision = new (otherEntity, 0.0f, position, Vector3.ZAxis);
                 HandlePossibleEntityCollision(entity, entityCollision, applyRepulsionForces, true);
             }
-
-            ListPool<WorldEntity>.Instance.Return(collisions);
         }
 
         private void HandlePossibleEntityCollision(WorldEntity entity, in EntityCollision entityCollision, bool applyRepulsionForces, bool boundsCheck)
@@ -716,13 +715,18 @@ namespace MHServerEmu.Games.Entities.Physics
         SendToClients = 1 << 4,
     }
 
-    public class PhysicsContext
+    public readonly struct PhysicsContext : IDisposable
     {
-        public List<WorldEntity> AttachedEntities { get; private set; }
+        public List<WorldEntity> AttachedEntities { get; }
 
         public PhysicsContext()
         {
-            AttachedEntities = new();
+            AttachedEntities = ListPool<WorldEntity>.Instance.Get();
+        }
+
+        public void Dispose()
+        {
+            ListPool<WorldEntity>.Instance.Return(AttachedEntities);
         }
     }
 

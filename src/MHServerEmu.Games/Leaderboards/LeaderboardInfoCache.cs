@@ -90,7 +90,7 @@ namespace MHServerEmu.Games.Leaderboards
         public NetMessageLeaderboardInitializeRequestResponse BuildInitializeRequestResponse(NetMessageLeaderboardInitializeRequest initializeRequest)
         {
             var response = NetMessageLeaderboardInitializeRequestResponse.CreateBuilder();
-            List<LeaderboardInstanceInfo> instances = ListPool<LeaderboardInstanceInfo>.Instance.Get();
+            using var instancesHandle = ListPool<LeaderboardInstanceInfo>.Instance.Get(out List<LeaderboardInstanceInfo> instances);
 
             lock (_leaderboardInfoMap)
             {
@@ -113,11 +113,10 @@ namespace MHServerEmu.Games.Leaderboards
                 }
             }
 
-            ListPool<LeaderboardInstanceInfo>.Instance.Return(instances);
             return response.Build();
         }
 
-        public void UpdateLeaderboardInstances(in GameServiceProtocol.LeaderboardStateChangeList instances)
+        public void UpdateLeaderboardInstances(in ServiceMessage.LeaderboardStateChangeList instances)
         {
             lock (_leaderboardInfoMap)
             {
@@ -126,7 +125,7 @@ namespace MHServerEmu.Games.Leaderboards
             }
         }
 
-        public void UpdateLeaderboardInstance(in GameServiceProtocol.LeaderboardStateChange instanceInfo)
+        public void UpdateLeaderboardInstance(in ServiceMessage.LeaderboardStateChange instanceInfo)
         {
             lock (_leaderboardInfoMap)
             {

@@ -4,7 +4,6 @@ using MHServerEmu.Core.Logging;
 using MHServerEmu.Core.Memory;
 using MHServerEmu.Core.System.Random;
 using MHServerEmu.Core.VectorMath;
-using MHServerEmu.Games.Common.SpatialPartitions;
 using MHServerEmu.Games.Entities;
 using MHServerEmu.Games.Events;
 using MHServerEmu.Games.GameData;
@@ -14,6 +13,7 @@ using MHServerEmu.Games.GameData.Prototypes.Markers;
 using MHServerEmu.Games.Navi;
 using MHServerEmu.Games.Populations;
 using MHServerEmu.Games.Properties;
+using MHServerEmu.Games.SpatialPartitions;
 
 namespace MHServerEmu.Games.Regions
 {
@@ -33,6 +33,9 @@ namespace MHServerEmu.Games.Regions
         private PrototypeId _populationThemeRef;
 
         private int _numInterestedPlayers = 0;
+
+        private byte _hotspotMask = 0;
+        private Dictionary<PrototypeGuid, ulong> _hotspotDict = [];
 
         public Event<PlayerEnteredCellGameEvent> PlayerEnteredCellEvent = new();
         public Event<PlayerLeftCellGameEvent> PlayerLeftCellEvent = new();
@@ -123,7 +126,104 @@ namespace MHServerEmu.Games.Regions
                 _status |= CellStatusFlag.PostInitialize;
                 InstanceMarkerSet(Prototype.InitializeSet, Transform3.Identity(), options);
             }
+
+            if (Prototype.HotspotPrototypes.HasValue())
+                for (int i = 0; i < Prototype.HotspotPrototypes.Length; i++)
+                    if (Prototype.HotspotPrototypes[i] != PrototypeGuid.Invalid)
+                        _hotspotMask |= (byte)(1 << i);
+
             return true;
+        }
+
+        public bool GetHotspotIndexData(Cell previousCell, int index, byte hotspotData, out byte outData)
+        {
+            outData = 0;
+
+            if (this != previousCell || _hotspotMask == 0 || hotspotData == 0) return false;
+
+            var oldProto = previousCell.Prototype;
+            var newProto = Prototype;
+
+            if (previousCell.PrototypeDataRef == PrototypeDataRef)
+            {
+                byte indexData = (byte)(1 << index);
+                if ((hotspotData & indexData) != 0)
+                {
+                    outData = indexData;
+                    return true;
+                }
+                return false;
+            }
+
+            var prevGuid = oldProto.HotspotPrototypes[index];
+            int newIndex = Array.IndexOf(newProto.HotspotPrototypes, prevGuid);
+            if (newIndex > 0 && newIndex < 8)
+            {
+                byte indexData = (byte)(1 << newIndex);
+                if ((hotspotData & indexData) != 0)
+                {
+                    outData = indexData;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        public void OnHotspotEnter(WorldEntity whom, PrototypeGuid hotspotGuid)
+        {
+            if (GetHotspot(hotspotGuid, out Hotspot hotspot))
+                hotspot.OnOverlapBegin(whom, whom.RegionLocation.Position, whom.RegionLocation.Position);
+        }
+
+        private bool GetHotspot(PrototypeGuid hotspotGuid, out Hotspot hotspot)
+        {
+            hotspot = null;
+            if (hotspotGuid == PrototypeGuid.Invalid) return false;
+
+            var manager = Game.EntityManager;
+            var region = Region;
+
+            if (_hotspotDict.TryGetValue(hotspotGuid, out ulong hotspotId))
+            {
+                hotspot = manager.GetEntity<Hotspot>(hotspotId);
+                if (hotspot != null)
+                    return true;
+                else
+                    _hotspotDict.Remove(hotspotGuid);
+            }
+
+            if (manager.IsDestroyingAllEntities || region.TestStatus(RegionStatus.Shutdown)) 
+                return false;
+
+            var hotspotRef = GameDatabase.GetDataRefByPrototypeGuid(hotspotGuid);
+            var hotspotProto = GameDatabase.GetPrototype<WorldEntityPrototype>(hotspotRef);
+            if (hotspotProto == null) return false;
+
+            using EntitySettings hotspotSettings = ObjectPoolManager.Instance.Get<EntitySettings>();
+            hotspotSettings.EntityRef = hotspotRef;
+            hotspotSettings.HotspotSkipCollide = true;
+
+            using PropertyCollection settingsProperties = ObjectPoolManager.Instance.Get<PropertyCollection>();
+            int level = region.RegionLevel;
+            settingsProperties[PropertyEnum.CharacterLevel] = level;
+            settingsProperties[PropertyEnum.CombatLevel] = level;
+            hotspotSettings.Properties = settingsProperties;
+
+            hotspot = manager.CreateEntity(hotspotSettings) as Hotspot;
+            if (hotspot == null) return false;
+            _hotspotDict[hotspotGuid] = hotspot.Id;
+           
+            hotspot.EnterWorld(region, RegionBounds.Center, Orientation.Zero);
+            hotspot.SetSimulated(true);
+
+            return true;
+        }
+
+        public void OnHotspotLeave(WorldEntity whom, PrototypeGuid hotspotGuid)
+        {
+            if (GetHotspot(hotspotGuid, out Hotspot hotspot))
+                hotspot.OnOverlapEnd(whom);
         }
 
         public void Generate()
@@ -146,8 +246,16 @@ namespace MHServerEmu.Games.Regions
 
         public void Shutdown()
         {
+            var manager = Game.EntityManager;
+            foreach (ulong hotspotId in _hotspotDict.Values)
+            {
+                var hotspot = manager.GetEntity<Hotspot>(hotspotId);
+                hotspot?.OnExitedWorld();
+            }
+            _hotspotDict.Clear();
+
             Region region = Region;
-            if (region != null && SpatialPartitionLocation.IsValid())
+            if (region != null && SpatialPartitionLocation.IsValid)
                 region.PartitionCell(this, RegionPartitionContext.Remove);
         }
 
@@ -155,7 +263,7 @@ namespace MHServerEmu.Games.Regions
         {
             if (Prototype == null) return;
 
-            if (SpatialPartitionLocation.IsValid())
+            if (SpatialPartitionLocation.IsValid)
                 Region.PartitionCell(this, RegionPartitionContext.Remove);
 
             AreaPosition = positionInArea;
@@ -169,7 +277,7 @@ namespace MHServerEmu.Games.Regions
             RegionBounds = Prototype.BoundingBox.Translate(AreaOffset);
             RegionBounds.RoundToNearestInteger();
 
-            if (SpatialPartitionLocation.IsValid() == false)
+            if (SpatialPartitionLocation.IsValid == false)
                 Region.PartitionCell(this, RegionPartitionContext.Insert);
         }
 
@@ -534,7 +642,7 @@ namespace MHServerEmu.Games.Regions
             Region region = Region;
             if (region == null) return Logger.WarnReturn(false, "GetEntitiesInCellBounds(): region == null");
 
-            region.GetEntitiesInVolume(entityList, RegionBounds, new(EntityRegionSPContextFlags.All));
+            region.GetEntitiesInVolume(entityList, RegionBounds, new());
             return true;
         }
 
@@ -548,13 +656,11 @@ namespace MHServerEmu.Games.Regions
             {
                 SpawnSpecScheduler.Spawn(false);
 
-                List<WorldEntity> entityList = ListPool<WorldEntity>.Instance.Get();
+                using var entityListHandle = ListPool<WorldEntity>.Instance.Get(out List<WorldEntity> entityList);
                 GetEntitiesInCellBounds(entityList);
 
                 foreach (WorldEntity worldEntity in entityList)
                     worldEntity.UpdateSimulationState();
-
-                ListPool<WorldEntity>.Instance.Return(entityList);
             } 
             else
                 SpawnSpecScheduler.Spawn(true);
@@ -575,13 +681,11 @@ namespace MHServerEmu.Games.Regions
 
             if (_numInterestedPlayers == 0)
             {
-                List<WorldEntity> entityList = ListPool<WorldEntity>.Instance.Get();
+                using var entityListHandle = ListPool<WorldEntity>.Instance.Get(out List<WorldEntity> entityList);
                 GetEntitiesInCellBounds(entityList);
 
                 foreach (WorldEntity worldEntity in entityList)
                     worldEntity.UpdateSimulationState();
-
-                ListPool<WorldEntity>.Instance.Return(entityList);
             }
         }
 
@@ -697,13 +801,14 @@ namespace MHServerEmu.Games.Regions
         #endregion
     }
 
-    public class CellRegionSpatialPartitionLocation : QuadtreeLocation<Cell>
+    public sealed class CellRegionSpatialPartitionLocation : QuadtreeLocation<Cell>
     {
+        public override Aabb Bounds { get => Element.RegionBounds; }
+
         public CellRegionSpatialPartitionLocation(Cell element) : base(element) { }
-        public override Aabb GetBounds() => Element.RegionBounds;
     }
 
-    public class CellSpatialPartition : Quadtree<Cell>
+    public sealed class CellSpatialPartition : Quadtree<Cell>
     {
         public CellSpatialPartition(in Aabb bound) : base(bound, 128.0f) { }
 

@@ -114,7 +114,10 @@ namespace MHServerEmu.Games.Populations
             {
                 settingsProperties[PropertyEnum.SpawnGroupId] = Group.Id;
                 if (Group.ObjectProto != null)
+                {
                     settingsProperties[PropertyEnum.ClusterPrototype] = Group.ObjectProto.DataRef;
+                    settingsProperties[PropertyEnum.MissionXEncounterHostilityOk] = Group.ObjectProto.AllowCrossMissionHostility;
+                }
 
                 if (Group.SpawnerId != Entity.InvalidId)
                 {
@@ -141,18 +144,19 @@ namespace MHServerEmu.Games.Populations
                 settings.ItemSpec = Game.LootManager.CreateItemSpec(EntityRef, LootContext.CashShop, null);
 
             ActiveEntity = manager.CreateEntity(settings) as WorldEntity;
+            if (ActiveEntity == null)
+                return Logger.WarnReturn(false, $"Spawn(): Failed to create entity {EntityRef.GetName()}");
 
             var twinBoost = GameDatabase.PopulationGlobalsPrototype.TwinEnemyBoost;
-            foreach (var kvp in Properties.IteratePropertyRange(PropertyEnum.EnemyBoost).ToArray())
+            foreach (var kvp in Properties.IteratePropertyRange(PropertyEnum.EnemyBoost))
             {
-                Property.FromParam(kvp.Key, 0, out PrototypeId modProtoRef);
-                if (modProtoRef == twinBoost)
+                Property.FromParam(kvp.Key, 0, out PrototypeId boostRef);
+                if (boostRef == twinBoost)
                 {
                     var rank = ActiveEntity.GetRankPrototype();
                     if (rank != null && rank.IsRankBoss) ActiveEntity.TwinEnemyBoost(cell);
-                    continue;
                 }
-                ActiveEntity.Properties[PropertyEnum.EnemyBoost, modProtoRef] = true;                
+                else ActiveEntity.Properties[PropertyEnum.EnemyBoost, boostRef] = true;
             }
 
             ReserveSlot(cell);

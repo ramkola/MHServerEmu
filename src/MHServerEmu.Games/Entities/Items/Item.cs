@@ -82,6 +82,7 @@ namespace MHServerEmu.Games.Entities.Items
         public bool IsTeamUpGear { get => Prototype is TeamUpGearPrototype; }
         public bool IsGem { get => ItemPrototype?.IsGem == true; }
         public bool IsClonedWhenPurchasedFromVendor { get => ItemPrototype?.ClonedWhenPurchasedFromVendor == true; }
+        public bool IsGuildUnlockItem { get => HasItemActionType(ItemActionType.GuildUnlock); }
 
         public Item(Game game) : base(game) 
         {
@@ -158,8 +159,9 @@ namespace MHServerEmu.Games.Entities.Items
                 // Account binding
                 if (Game.CustomGameOptions.DisableAccountBinding == false)
                 {
-                    // HACK: Do not account bind tradable items until we get the trade window implemented
-                    if (BindsToAccountOnPickup && IsTradable == false)
+                    // NOTE: Adding IsTradable == false to the check here can disable the Not Droppable binding state,
+                    // allowing Not Droppable items to be traded without the trade window.
+                    if (BindsToAccountOnPickup)
                     {
                         Player playerOwner = owner?.GetSelfOrOwnerOfType<Player>();
                         if (playerOwner != null && IsBoundToAccount == false)
@@ -355,9 +357,12 @@ namespace MHServerEmu.Games.Entities.Items
 
                     Inventory ownerInventory = GetOwnerInventory();
                     if (ownerInventory != null)
-                        owner.AdjustCraftingIngredientAvailable(PrototypeDataRef, delta, ownerInventory.Category);
-
-                    // TODO: trade-specific stuff
+                    {
+                        if (ownerInventory.ConvenienceLabel == InventoryConvenienceLabel.Trade)
+                            owner.OnPlayerTradeInventoryChanged();
+                        else
+                            owner.AdjustCraftingIngredientAvailable(PrototypeDataRef, delta, ownerInventory.Category);
+                    }
 
                     Region region = owner.GetRegion();
                     if (region == null)
@@ -597,7 +602,7 @@ namespace MHServerEmu.Games.Entities.Items
 
             bool isInRecipeLibrary = false;
 
-            List<PrototypeId> inventoryList = ListPool<PrototypeId>.Instance.Get();
+            using var inventoryListHandle = ListPool<PrototypeId>.Instance.Get(out List<PrototypeId> inventoryList);
             if (vendorTypeProto.GetInventories(inventoryList))
             {
                 foreach (PrototypeId crafterVendorInvProtoRef in inventoryList)
@@ -629,8 +634,6 @@ namespace MHServerEmu.Games.Entities.Items
                         break;
                 }
             }
-
-            ListPool<PrototypeId>.Instance.Return(inventoryList);
 
             if (isInRecipeLibrary == false)
                 return CraftingResult.RecipeNotInRecipeLibrary;
@@ -996,7 +999,7 @@ namespace MHServerEmu.Games.Entities.Items
             int indexSeed = random.GetSeed();
 
             // Apply built-in affixes
-            List<BuiltInAffixDetails> detailsList = ListPool<BuiltInAffixDetails>.Instance.Get();
+            using var detailsListHandle = ListPool<BuiltInAffixDetails>.Instance.Get(out List<BuiltInAffixDetails> detailsList);
             if (itemProto.GenerateBuiltInAffixDetails(_itemSpec, detailsList))
             {
                 foreach (BuiltInAffixDetails builtInAffixDetails in detailsList)
@@ -1012,8 +1015,6 @@ namespace MHServerEmu.Games.Entities.Items
                     OnAffixAdded(random, affixProto, builtInAffixDetails.ScopeProtoRef, builtInAffixDetails.AvatarProtoRef, builtInAffixDetails.LevelRequirement);
                 }
             }
-
-            ListPool<BuiltInAffixDetails>.Instance.Return(detailsList);
 
             // Apply rolled affixes
             IReadOnlyList<AffixSpec> affixSpecs = _itemSpec.AffixSpecs;
@@ -1401,6 +1402,158 @@ namespace MHServerEmu.Games.Entities.Items
             return GameDatabase.AdvancementGlobalsPrototype.GetItemAffixLevelUpXPRequirement(level);
         }
 
+        public bool CanSocketGem(Item gem)
+        {
+            AffixPrototype gemAffixProto = null;
+
+            // Find a gem affix on the gem item
+            IReadOnlyList<AffixSpec> gemAffixes = gem.ItemSpec.AffixSpecs;
+            for (int i = 0; i < gemAffixes.Count; i++)
+            {
+                AffixSpec affixSpec = gemAffixes[i];
+                AffixPrototype affixProto = affixSpec.AffixProto;
+
+                if (affixProto == null)
+                {
+                    Logger.Warn("CanSocketGem(): affixProto == null");
+                    continue;
+                }
+
+                if (affixProto.IsGemAffix)
+                {
+                    gemAffixProto = affixProto;
+                    break;
+                }
+            }
+
+            if (gemAffixProto == null)
+                return Logger.WarnReturn(false, $"CanSocketGem(): Unable to find socket affix on gem.\nGem: {gem}");
+
+            // Find a matching socket affix on the destination item
+            IReadOnlyList<AffixSpec> itemAffixes = ItemSpec.AffixSpecs;
+            for (int i = 0; i < itemAffixes.Count; i++)
+            {
+                AffixSpec affixSpec = itemAffixes[i];
+                AffixPrototype affixProto = affixSpec.AffixProto;
+
+                if (affixProto == null)
+                {
+                    Logger.Warn("CanSocketGem(): affixProto == null");
+                    continue;
+                }
+
+                if (affixProto.Position == gemAffixProto.Position)
+                    return true;
+            }
+
+            return false;
+        }
+
+        public bool SocketGem(Item gem)
+        {
+            ItemPrototype gemProto = gem.ItemPrototype;
+            if (gemProto == null) return Logger.WarnReturn(false, "SocketGem(): gemProto == null");
+
+            // The existence of the gem affix should have been already validated by CanSocketGem().
+            IReadOnlyList<AffixSpec> gemAffixes = gem.ItemSpec.AffixSpecs;
+            AffixSpec gemAffixSpec = gemAffixes.Count > 0 ? gemAffixes[0] : null;
+
+            AffixPrototype gemAffixProto = gemAffixSpec?.AffixProto;
+            if (gemAffixProto == null) return Logger.WarnReturn(false, "SocketGem(): gemAffixProto == null");
+
+            if (gemAffixProto.IsGemAffix == false)
+                return Logger.WarnReturn(false, $"SocketGem(): Trying to socket an affix that is not a supported!\n Affix: {gemAffixProto}\nItem: {this}");
+
+            // Find and remove the affix to replace
+            AffixPrototype removeAffixProto = null;
+
+            IReadOnlyList<AffixSpec> affixes = ItemSpec.AffixSpecs;
+            for (int i = 0; i < affixes.Count; i++)
+            {
+                AffixSpec affixSpec = affixes[i];
+                AffixPrototype affixProto = affixSpec.AffixProto;
+
+                if (affixProto == null)
+                {
+                    Logger.Warn("SocketGem(): affixProto == null");
+                    continue;
+                }
+
+                if (affixProto.Position == gemAffixProto.Position)
+                {
+                    removeAffixProto = affixProto;
+                    break;
+                }
+            }
+
+            if (removeAffixProto == null)
+                return Logger.WarnReturn(false, $"SocketGem(): Trying to set a socket on an item that doesn't have that affix position! Item: {this}");
+
+            RemoveSocketAffix(removeAffixProto);
+
+            // Add the affix from the gem item
+            ItemSpec.AddAffixSpec(gemAffixSpec);
+
+            GRandom random = new(gemAffixSpec.Seed);
+            OnAffixAdded(random, gemAffixSpec.AffixProto, gemAffixSpec.ScopeProtoRef, ItemSpec.EquippableBy, 0);
+
+            // Notify the clients
+            NetMessageSocketGem message = NetMessageSocketGem.CreateBuilder()
+                .SetGemId(gem.Id)
+                .SetDestItemId(Id)
+                .Build();
+
+            Game.NetworkManager.SendMessageToInterested(message, this, AOINetworkPolicyValues.AOIChannelProximity | AOINetworkPolicyValues.AOIChannelOwner);
+
+            // Destroy the gem
+            gem.Destroy();
+            
+            return true;
+        }
+
+        private bool RemoveSocketAffix(AffixPrototype affixProto)
+        {
+            int removeSpecIt = -1;
+
+            // Break ItemSpec's incapsulation here a bit to remove the affix spec.
+            IList<AffixSpec> affixes = (IList<AffixSpec>)ItemSpec.AffixSpecs;
+            for (int i = 0; i < affixes.Count; i++)
+            {
+                AffixSpec affixSpec = affixes[i];
+                if (affixSpec.AffixProto.DataRef == affixProto.DataRef)
+                {
+                    removeSpecIt = i;
+                    break;
+                }
+            }
+
+            if (removeSpecIt == -1)
+                return Logger.WarnReturn(false, $"RemoveSocketAffix(): Failed to find AffixSpec to remove.\nItem: {this}");
+
+            affixes.RemoveAt(removeSpecIt);
+
+            // Remove the affix property entry.
+            bool erased = false;
+            for (int i = 0; i < _affixProperties.Count; i++)
+            {
+                AffixPropertiesCopyEntry entry = _affixProperties[i];
+                if (entry.AffixProto.DataRef != affixProto.DataRef)
+                    continue;
+
+                if (entry.Properties != null && Properties.HasChildCollection(entry.Properties))
+                    entry.Properties.RemoveFromParent(Properties);
+
+                erased = true;
+                _affixProperties.RemoveAt(i);
+                break;
+            }
+
+            if (erased == false)
+                return Logger.WarnReturn(false, $"RemoveSocketAffix(): Failed to find AffixPropertyCopyEntry to remove.\nItem: {this}");
+
+            return true;
+        }
+
         public int GetDisplayItemLevel()
         {
             var itemProto = ItemPrototype;
@@ -1663,7 +1816,7 @@ namespace MHServerEmu.Games.Entities.Items
                     if (scopeProtoRef.As<PowerPrototype>() == null)
                     {
                         return Logger.WarnReturn(false, string.Format(
-                            $"OnAffixAdded(): AffixPowerModifier IsForSinglePowerOnly but scopeProtoRef is not a power! Affix=[{0}] Scope=[{1}] Item=[{2}]",
+                            "OnAffixAdded(): AffixPowerModifier IsForSinglePowerOnly but scopeProtoRef is not a power! Affix=[{0}] Scope=[{1}] Item=[{2}]",
                             affixProto.ToString(),
                             scopeProtoRef.GetName(),
                             _itemSpec.ItemProtoRef.GetName()));
@@ -1672,7 +1825,7 @@ namespace MHServerEmu.Games.Entities.Items
                     if (avatarProtoRef == PrototypeId.Invalid && affixProto.IsGemAffix == false)
                     {
                         return Logger.WarnReturn(false, string.Format(
-                            $"OnAffixAdded(): Non-gem AffixPowerModifier IsForSinglePowerOnly, but avatarProtoRef is invalid! Affix=[{0}] Scope=[{1}] Item=[{2}]",
+                            "OnAffixAdded(): Non-gem AffixPowerModifier IsForSinglePowerOnly, but avatarProtoRef is invalid! Affix=[{0}] Scope=[{1}] Item=[{2}]",
                             affixProto.ToString(),
                             scopeProtoRef.GetName(),
                             _itemSpec.ItemProtoRef.GetName()));
@@ -1682,7 +1835,7 @@ namespace MHServerEmu.Games.Entities.Items
                     if (avatarProto == null)
                     {
                         return Logger.WarnReturn(false, string.Format(
-                            $"OnAffixAdded(): Unable to get Avatar=[{0}]. Affix=[{1}] Item=[{2}]",
+                            "OnAffixAdded(): Unable to get Avatar=[{0}]. Affix=[{1}] Item=[{2}]",
                             avatarProtoRef.GetName(),
                             affixProto.ToString(),
                             _itemSpec.ItemProtoRef.GetName()));
@@ -1692,7 +1845,7 @@ namespace MHServerEmu.Games.Entities.Items
                     if (powerProgEntry == null)
                     {
                         return Logger.WarnReturn(false, string.Format(
-                            $"OnAffixAdded(): Unable to get Power[{0}] in Avatar[{1}] Power Progression Table. Affix=[{2}] Item=[{3}]",
+                            "OnAffixAdded(): Unable to get Power[{0}] in Avatar[{1}] Power Progression Table. Affix=[{2}] Item=[{3}]",
                             scopeProtoRef.GetName(),
                             avatarProtoRef.GetName(),
                             affixProto.ToString(),
@@ -1708,7 +1861,7 @@ namespace MHServerEmu.Games.Entities.Items
                     if (scopeProtoRef.As<AvatarPrototype>() == null)
                     {
                         return Logger.WarnReturn(false, string.Format(
-                            $"OnAffixAdded(): AffixPowerModifier is for PowerProgTableTabRef but scopeProtoRef is not an avatar! Affix=[{0}] Scope=[{1}] Item=[{2}]",
+                            "OnAffixAdded(): AffixPowerModifier is for PowerProgTableTabRef but scopeProtoRef is not an avatar! Affix=[{0}] Scope=[{1}] Item=[{2}]",
                             affixProto.ToString(),
                             scopeProtoRef.GetName(),
                             _itemSpec.ItemProtoRef.GetName()));
@@ -1719,7 +1872,7 @@ namespace MHServerEmu.Games.Entities.Items
                     if (scopeProtoRef != PrototypeId.Invalid)
                     {
                         return Logger.WarnReturn(false, string.Format(
-                            $"OnAffixAdded(): AffixPowerModifier is for PowerKeywordFilter but scopeProtoRef is NOT invalid as expected! Affix=[{0}] Scope=[{1}] Item=[{2}]",
+                            "OnAffixAdded(): AffixPowerModifier is for PowerKeywordFilter but scopeProtoRef is NOT invalid as expected! Affix=[{0}] Scope=[{1}] Item=[{2}]",
                             affixProto.ToString(),
                             scopeProtoRef.GetName(),
                             _itemSpec.ItemProtoRef.GetName()));

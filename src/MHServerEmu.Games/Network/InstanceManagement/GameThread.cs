@@ -2,7 +2,9 @@
 using MHServerEmu.Core.Helpers;
 using MHServerEmu.Core.Logging;
 using MHServerEmu.Core.Memory;
+using MHServerEmu.Core.Metrics;
 using MHServerEmu.Core.Network;
+using MHServerEmu.Games.Entities;
 using MHServerEmu.Games.GameData.LiveTuning;
 using MHServerEmu.Games.Regions;
 
@@ -117,6 +119,8 @@ namespace MHServerEmu.Games.Network.InstanceManagement
             CollectionPoolSettings.UseThreadLocalStorage = true;
             ObjectPoolManager.UseThreadLocalStorage = true;
 
+            EntityDestroyListNodePool.Instance = new(Id);
+
             InitializeLiveTuning();
         }
 
@@ -221,7 +225,8 @@ namespace MHServerEmu.Games.Network.InstanceManagement
                 writer.Write(game.GameEventScheduler.GetPoolReportString());
                 writer.WriteLine();
 
-                writer.WriteLine($"Server Status:\n{ServerManager.Instance.GetServerStatus(true)}\n");
+                writer.WriteLine($"Server Status:\n{ServerManager.Instance.GetServerStatusString()}\n");
+                writer.WriteLine($"Performance Metrics:\n{MetricsManager.Instance.GeneratePerformanceReport(MetricsReportFormat.PlainText)}\n");
             }
 
             Logger.ErrorException(exception, $"Game instance crashed, report saved to {crashReportFilePath}");

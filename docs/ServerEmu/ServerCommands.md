@@ -1,6 +1,6 @@
 # Server Commands
 
-This list was automatically generated on `2025.06.24 20:56:10 UTC` using server version `0.7.0`.
+This list was automatically generated on `2026.01.21 10:37:50 UTC` using server version `0.8.1`.
 
 To see an up to date list of all commands, type !commands in the server console or the in-game chat. When invoking a command from in-game your account has to meet the user level requirement for the command.
 
@@ -12,19 +12,22 @@ Account management commands.
 | !account ban [email]                            | Bans the specified account.                       | Moderator  | Any           |
 | !account create [email] [playerName] [password] | Creates a new account.                            | Any        | Any           |
 | !account download                               | Downloads a JSON copy of the current account.     | Any        | Client        |
-| !account info                                   | Shows information for the logged in account.      | Any        | Client        |
+| !account info                                   | Shows information for the logged in account.      | Moderator  | Client        |
 | !account password [email] [password]            | Changes password for the specified account.       | Any        | Any           |
 | !account playername [email] [playername]        | Changes player name for the specified account.    | Any        | Any           |
 | !account unban [email]                          | Unbans the specified account.                     | Moderator  | Any           |
+| !account unwhitelist [email]                    | Removes the specified account from the whitelist. | Admin      | Any           |
 | !account userlevel [email] [0/1/2]              | Changes user level for the specified account.     | Admin      | Any           |
 | !account verify [email] [password]              | Checks if an email/password combination is valid. | Admin      | Any           |
+| !account whitelist [email]                      | Whitelists the specified account.                 | Admin      | Any           |
 
 ## Achievement
 Commands related to the achievement system.
 
-| Command                | Description                                 | User Level | Invoker Type  |
-| ---------------------- | ------------------------------------------- | ---------- | ------------  |
-| !achievement info [id] | Outputs info for the specified achievement. | Admin      | Any           |
+| Command                | Description                                             | User Level | Invoker Type  |
+| ---------------------- | ------------------------------------------------------- | ---------- | ------------  |
+| !achievement info [id] | Outputs info for the specified achievement.             | Admin      | Any           |
+| !achievement localeid  | Generates a LocaleStringId from the specified argument. | Admin      | Any           |
 
 ## AOI
 Commands for interacting with the invoker player's area of interest (AOI).
@@ -42,6 +45,8 @@ Commands for boosting the stats of the invoker player's current avatar.
 | Command                 | Description                                         | User Level | Invoker Type  |
 | ----------------------- | --------------------------------------------------- | ---------- | ------------  |
 | !boost damage [1-10000] | Sets DamagePctBonus for the current avatar.         | Admin      | Client        |
+| !boost invulnerable     | Switches Invulnerable for the current avatar.       | Admin      | Client        |
+| !boost mana             | Switches NoEnduranceCosts for the current avatar.   | Admin      | Client        |
 | !boost vsboss [1-10000] | Sets DamagePctBonusVsBosses for the current avatar. | Admin      | Client        |
 
 ## Client
@@ -55,24 +60,25 @@ Commands for interacting with connected clients.
 ## Debug
 Debug commands for development.
 
-| Command                      | Description                                                                            | User Level | Invoker Type   |
-| ---------------------------- | -------------------------------------------------------------------------------------- | ---------- | -------------  |
-| !debug ai                    | No description available.                                                              | Admin      | Client         |
-| !debug area                  | Shows current area.                                                                    | Any        | Client         |
-| !debug cell                  | Shows current cell.                                                                    | Any        | Client         |
-| !debug crashgame             | Crashes the current game instance.                                                     | Admin      | Client         |
-| !debug crashserver           | Crashes the entire server.                                                             | Admin      | ServerConsole  |
-| !debug difficulty            | Shows information about the current difficulty level.                                  | Any        | Client         |
-| !debug forcegc               | Requests the garbage collector to perform a collection.                                | Admin      | Any            |
-| !debug getconditionlist      | Gets a list of all conditions tracked by the ConditionPool in the current game.        | Moderator  | Client         |
-| !debug geteventpoolreport    | Returns a report representing the state of the ScheduledEventPool in the current game. | Moderator  | Client         |
-| !debug metagame [on/off]     | No description available.                                                              | Admin      | Any            |
-| !debug navi2obj [PathFlags]  | Default PathFlags is Walk, can be [None/Fly/Power/Sight].                              | Admin      | Client         |
-| !debug region                | Shows current region.                                                                  | Any        | Client         |
-| !debug seed                  | Shows current seed.                                                                    | Any        | Client         |
-| !debug setmarker [MarkerRef] | No description available.                                                              | Admin      | Any            |
-| !debug spawn [on/off]        | No description available.                                                              | Admin      | Any            |
-| !debug test                  | Runs test code.                                                                        | Admin      | Any            |
+| Command                      | Description                                                                                                             | User Level | Invoker Type   |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------- | ---------- | -------------  |
+| !debug ai                    | No description available.                                                                                               | Admin      | Client         |
+| !debug area                  | Shows current area.                                                                                                     | Any        | Client         |
+| !debug cell                  | Shows current cell.                                                                                                     | Any        | Client         |
+| !debug compactloh            | Requests the garbage collector to compact the large object heap (LOH) during the next full-blocking garbage collection. | Admin      | Any            |
+| !debug crashgame             | Crashes the current game instance.                                                                                      | Admin      | Client         |
+| !debug crashserver           | Crashes the entire server.                                                                                              | Admin      | ServerConsole  |
+| !debug difficulty            | Shows information about the current difficulty level.                                                                   | Any        | Client         |
+| !debug forcegc               | Requests the garbage collector to perform a collection.                                                                 | Admin      | Any            |
+| !debug getconditionlist      | Gets a list of all conditions tracked by the ConditionPool in the current game.                                         | Moderator  | Client         |
+| !debug geteventpoolreport    | Returns a report representing the state of the ScheduledEventPool in the current game.                                  | Moderator  | Client         |
+| !debug metagame [on/off]     | No description available.                                                                                               | Admin      | Any            |
+| !debug navi2obj [PathFlags]  | Default PathFlags is Walk, can be [None/Fly/Power/Sight].                                                               | Admin      | Client         |
+| !debug region                | Shows current region.                                                                                                   | Any        | Client         |
+| !debug seed                  | Shows current seed.                                                                                                     | Any        | Client         |
+| !debug setmarker [MarkerRef] | No description available.                                                                                               | Admin      | Any            |
+| !debug spawn [on/off]        | No description available.                                                                                               | Admin      | Any            |
+| !debug test                  | Runs test code.                                                                                                         | Admin      | Any            |
 
 ## Entity
 Entity management commands.
@@ -89,13 +95,12 @@ Entity management commands.
 | !entity tp [pattern]                      | Teleports to the first entity present in the region which prototype name contains the string given (ignore the case). | Admin      | Client        |
 
 ## Instance
-Commands for managing  region instances.
+Commands for managing region instances.
 
-| Command           | Description                                     | User Level | Invoker Type  |
-| ----------------- | ----------------------------------------------- | ---------- | ------------  |
-| !instance list    | Lists private instances.                        | Any        | Client        |
-| !instance listall | Lists all region instances in the current game. | Any        | Client        |
-| !instance reset   | Resets private instances.                       | Any        | Client        |
+| Command         | Description                                         | User Level | Invoker Type  |
+| --------------- | --------------------------------------------------- | ---------- | ------------  |
+| !instance list  | Lists instances in the player's WorldView.          | Any        | Client        |
+| !instance reset | Resets private instances in the player's WorldView. | Admin      | Client        |
 
 ## Item
 Commands for managing items.
@@ -206,20 +211,32 @@ Region management commands.
 ## Server
 Server management commands.
 
-| Command                  | Description                               | User Level | Invoker Type   |
-| ------------------------ | ----------------------------------------- | ---------- | -------------  |
-| !server broadcast        | Broadcasts a notification to all players. | Admin      | Any            |
-| !server reloadlivetuning | Reloads live tuning settings.             | Admin      | ServerConsole  |
-| !server shutdown         | Shuts the server down.                    | Admin      | Any            |
-| !server status           | Prints server status.                     | Any        | Any            |
+| Command                           | Description                               | User Level | Invoker Type   |
+| --------------------------------- | ----------------------------------------- | ---------- | -------------  |
+| !server broadcast                 | Broadcasts a notification to all players. | Admin      | Any            |
+| !server reloadaddg                | Reloads the Add G page.                   | Admin      | ServerConsole  |
+| !server reloadcatalog             | Reloads MTX store catalog.                | Admin      | ServerConsole  |
+| !server reloaddashboard           | Reloads the web dashboard.                | Admin      | ServerConsole  |
+| !server reloadlivetuning          | Reloads live tuning settings.             | Admin      | ServerConsole  |
+| !server reloadplayernameblacklist | Reloads the player name blacklist.        | Admin      | ServerConsole  |
+| !server shutdown                  | Shuts the server down.                    | Admin      | Any            |
+| !server status                    | Prints server status.                     | Any        | Any            |
 
 ## Store
 Commands for interacting with the in-game store.
 
-| Command              | Description                                                     | User Level | Invoker Type  |
-| -------------------- | --------------------------------------------------------------- | ---------- | ------------  |
-| !store addg [amount] | Adds the specified number of Gs to this account.                | Admin      | Client        |
-| !store convertes     | Converts 100 Eternity Splinters to the equivalent amount of Gs. | Any        | Client        |
+| Command                   | Description                                                                                                              | User Level | Invoker Type  |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------ | ---------- | ------------  |
+| !store addg [amount]      | Adds the specified number of Gs to this account.                                                                         | Admin      | Client        |
+| !store convertes [amount] | Converts Eternity Splinters to the equivalent amount of Gs. Defaults to 100 Eternity Splinters if no value is specified. | Any        | Client        |
+
+## UltimatePrestige
+Ultimate Prestige system commands.
+
+| Command                    | Description                                           | User Level | Invoker Type  |
+| -------------------------- | ----------------------------------------------------- | ---------- | ------------  |
+| !ultimateprestige activate | Activates the Ultimate Prestige for the current hero. | Any        | Client        |
+| !ultimateprestige level    | Prints the current Ultimate Prestige level.           | Any        | Client        |
 
 ## Unlock
 Commands for unlocking various things.
@@ -228,6 +245,14 @@ Commands for unlocking various things.
 | ----------------- | ---------------------- | ---------- | ------------  |
 | !unlock chapters  | Unlocks all chapters.  | Admin      | Client        |
 | !unlock waypoints | Unlocks all waypoints. | Admin      | Client        |
+
+## WebApi
+Web API management commands.
+
+| Command             | Description                  | User Level | Invoker Type   |
+| ------------------- | ---------------------------- | ---------- | -------------  |
+| !webapi generatekey | Generates a new web API key. | Admin      | ServerConsole  |
+| !webapi reloadkeys  | Reloads web API keys         | Admin      | ServerConsole  |
 
 ## Misc
 
@@ -239,6 +264,7 @@ Commands for unlocking various things.
 | !help                | Help needs no help.                                                                                          | Any        | Any            |
 | !jail                | Teleports to East Side: Detention Facility (old).                                                            | Admin      | Client         |
 | !position            | Shows current position.                                                                                      | Any        | Client         |
+| !syncmana            | Syncs the current mana value with the server.                                                                | Any        | Client         |
 | !tower               | Teleports to Avengers Tower (original).                                                                      | Any        | Client         |
 | !tp                  | Teleports to position. Usage: tp x:+1000 (relative to current position) tp x100 y500 z10 (absolute position) | Admin      | Client         |
 

@@ -244,6 +244,11 @@ namespace MHServerEmu.Games.Regions
         public readonly int PartySize = partySize;
     }
 
+    public readonly struct PlayerLeavePartyGameEvent(Player player) : IGameEventData
+    {
+        public readonly Player Player = player;
+    }
+
     public readonly struct CurrencyCollectedGameEvent(Player player, PrototypeId currency, int amount) : IGameEventData
     {
         public readonly Player Player = player;
@@ -406,6 +411,16 @@ namespace MHServerEmu.Games.Regions
     }
 
     public readonly struct EntityLeaveDormantGameEvent(WorldEntity entity) : IGameEventData
+    {
+        public readonly WorldEntity Entity = entity;
+    }
+
+    public readonly struct EntityEnteredCombatGameEvent(WorldEntity entity) : IGameEventData
+    {
+        public readonly WorldEntity Entity = entity;
+    }
+
+    public readonly struct EntityExitedCombatGameEvent(WorldEntity entity) : IGameEventData
     {
         public readonly WorldEntity Entity = entity;
     }
